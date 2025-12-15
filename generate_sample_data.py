@@ -24,7 +24,8 @@ def generate_sample_data():
             truck_plate="ABC123XY",
             duration_minutes=60,
             sample_rate_seconds=5,
-            cell_dimensions="3x2x2 m",
+            internal_surface_m2=12.5,
+            external_surface_m2=15.2,
             notes="Sessione di test con dati simulati"
         )
         

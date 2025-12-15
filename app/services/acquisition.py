@@ -143,14 +143,82 @@ class AcquisitionService:
         """
         Loop principale di acquisizione dati.
         Esegue letture periodiche dai due SDM120 e salva su database.
+        Gestisce automaticamente disconnessioni e riconnessioni USB.
+        Ferma automaticamente la sessione quando viene raggiunta la durata prevista.
         """
         logger.info("Thread acquisizione avviato")
+        consecutive_errors = 0
+        max_consecutive_errors = 5  # Dopo 5 errori consecutivi, tenta riconnessione
         
         while self._running:
             try:
+                # Verifica se la durata della sessione è stata raggiunta
+                if self._current_session_id:
+                    session = self.db.query(TestSession).filter(
+                        TestSession.id == self._current_session_id
+                    ).first()
+                    
+                    if session and session.duration_minutes and session.started_at:
+                        # Calcola tempo trascorso
+                        elapsed = datetime.utcnow() - session.started_at
+                        elapsed_minutes = elapsed.total_seconds() / 60.0
+                        
+                        # Se la durata è stata raggiunta, ferma la sessione
+                        if elapsed_minutes >= session.duration_minutes:
+                            logger.info(
+                                f"Sessione {self._current_session_id} completata: "
+                                f"durata raggiunta ({elapsed_minutes:.1f}/{session.duration_minutes} minuti)"
+                            )
+                            # Aggiorna stato sessione direttamente (non chiamare stop() per evitare join del thread corrente)
+                            session.status = SessionStatus.COMPLETED.value
+                            session.completed_at = datetime.utcnow()
+                            self.db.commit()
+                            logger.info(f"Sessione {self._current_session_id} completata e aggiornata")
+                            
+                            # Ferma il loop
+                            with self._lock:
+                                self._running = False
+                                self._current_session_id = None
+                            return
+                
+                # Verifica connessione prima di ogni lettura
+                if not self.reader or not self.reader.is_connected():
+                    logger.warning("Connessione Modbus persa, tentativo di riconnessione...")
+                    if not self._reconnect():
+                        logger.warning("Riconnessione fallita, attendo prima di riprovare...")
+                        time.sleep(self._sample_rate * 2)  # Attendi più a lungo se non connesso
+                        consecutive_errors += 1
+                        continue
+                    else:
+                        logger.info("Riconnessione Modbus riuscita")
+                        consecutive_errors = 0
+                
                 # Leggi da entrambi i dispositivi
                 heater_data = self.reader.read_all(MODBUS_CONFIG["slave_ids"]["heater"])
                 fan_data = self.reader.read_all(MODBUS_CONFIG["slave_ids"]["fan"])
+                
+                # Se entrambe le letture falliscono, potrebbe essere un problema di connessione
+                if heater_data is None and fan_data is None:
+                    consecutive_errors += 1
+                    if consecutive_errors >= max_consecutive_errors:
+                        logger.warning(
+                            f"{consecutive_errors} letture consecutive fallite, "
+                            "tentativo di riconnessione..."
+                        )
+                        self.reader.disconnect()
+                        if not self._reconnect():
+                            logger.error("Riconnessione fallita dopo errori multipli")
+                            time.sleep(self._sample_rate * 2)
+                            continue
+                        else:
+                            consecutive_errors = 0
+                    else:
+                        logger.debug(
+                            f"Lettura fallita (errori consecutivi: {consecutive_errors})"
+                        )
+                else:
+                    # Reset contatore errori se almeno una lettura riesce
+                    consecutive_errors = 0
                 
                 # Salva misure su database
                 if heater_data:
@@ -158,7 +226,9 @@ class AcquisitionService:
                         self._current_session_id,
                         DeviceType.HEATER.value,
                         heater_data["power_w"],
-                        heater_data["energy_kwh"]
+                        heater_data["energy_kwh"],
+                        heater_data.get("voltage_v"),
+                        heater_data.get("frequency_hz")
                     )
                 
                 if fan_data:
@@ -166,20 +236,80 @@ class AcquisitionService:
                         self._current_session_id,
                         DeviceType.FAN.value,
                         fan_data["power_w"],
-                        fan_data["energy_kwh"]
+                        fan_data["energy_kwh"],
+                        fan_data.get("voltage_v"),
+                        fan_data.get("frequency_hz")
                     )
                 
                 # Attendi prima della prossima lettura
                 time.sleep(self._sample_rate)
                 
             except Exception as e:
+                consecutive_errors += 1
                 logger.error(f"Errore nel loop di acquisizione: {e}")
+                
+                # Se ci sono troppi errori consecutivi, tenta riconnessione
+                if consecutive_errors >= max_consecutive_errors:
+                    logger.warning(
+                        f"{consecutive_errors} errori consecutivi, "
+                        "tentativo di riconnessione..."
+                    )
+                    if self.reader:
+                        try:
+                            self.reader.disconnect()
+                        except Exception:
+                            pass
+                    if not self._reconnect():
+                        logger.error("Riconnessione fallita dopo errori multipli")
+                        consecutive_errors = 0  # Reset per evitare loop infinito
+                
                 # Continua anche in caso di errore (non bloccare il loop)
                 time.sleep(self._sample_rate)
         
         logger.info("Thread acquisizione terminato")
     
-    def _save_measurement(self, session_id: int, device_type: str, power_w: float, energy_kwh: float):
+    def _reconnect(self) -> bool:
+        """
+        Tenta di riconnettere il dispositivo Modbus.
+        
+        Returns:
+            True se riconnessione riuscita, False altrimenti
+        """
+        try:
+            # Chiudi connessione esistente se presente
+            if self.reader:
+                try:
+                    self.reader.disconnect()
+                except Exception:
+                    pass
+            
+            # Crea nuovo reader e connetti
+            self.reader = SDM120Reader(
+                port=MODBUS_CONFIG["port"],
+                baudrate=MODBUS_CONFIG["baudrate"],
+                timeout=MODBUS_CONFIG["timeout"]
+            )
+            
+            if self.reader.connect():
+                logger.info("Riconnessione Modbus riuscita")
+                return True
+            else:
+                logger.warning("Riconnessione Modbus fallita")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Errore durante riconnessione: {e}")
+            return False
+    
+    def _save_measurement(
+        self,
+        session_id: int,
+        device_type: str,
+        power_w: float,
+        energy_kwh: float,
+        voltage_v: Optional[float] = None,
+        frequency_hz: Optional[float] = None
+    ):
         """
         Salva una misura su database.
         
@@ -188,6 +318,8 @@ class AcquisitionService:
             device_type: "heater" o "fan"
             power_w: Potenza in Watt
             energy_kwh: Energia in kWh
+            voltage_v: Tensione in Volt (opzionale)
+            frequency_hz: Frequenza in Hz (opzionale)
         """
         try:
             measurement = Measurement(
@@ -195,6 +327,8 @@ class AcquisitionService:
                 device_type=device_type,
                 power_w=power_w,
                 energy_kwh=energy_kwh,
+                voltage_v=voltage_v,
+                frequency_hz=frequency_hz,
                 timestamp=datetime.utcnow()
             )
             self.db.add(measurement)

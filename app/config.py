@@ -39,7 +39,7 @@ ACQUISITION_CONFIG = {
 AUTH_CONFIG = {
     "secret_key": os.getenv("SECRET_KEY", "change-this-secret-key-in-production"),
     "algorithm": "HS256",
-    "access_token_expire_minutes": 480,  # 8 ore
+    "access_token_expire_minutes": 24*60,  # 24 ore
     "default_username": "admin",
     "default_password": "admin",  # DA CAMBIARE AL PRIMO AVVIO
 }

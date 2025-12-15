@@ -10,8 +10,9 @@
 	let showModal = false;
 	let formData = {
 		truck_plate: '',
-		cell_dimensions: '',
-		duration_minutes: 30,
+		internal_surface_m2: null as number | null,
+		external_surface_m2: null as number | null,
+		duration_minutes: null as number | null,
 		sample_rate_seconds: 5,
 		notes: ''
 	};
@@ -43,7 +44,7 @@
 	}
 
 	async function createSession() {
-		if (!formData.truck_plate || !formData.duration_minutes) {
+		if (!formData.truck_plate) {
 			alert('Compila tutti i campi obbligatori');
 			return;
 		}
@@ -52,16 +53,18 @@
 		try {
 			await api.createSession({
 				truck_plate: formData.truck_plate,
-				cell_dimensions: formData.cell_dimensions || undefined,
-				duration_minutes: formData.duration_minutes,
+				internal_surface_m2: formData.internal_surface_m2 || undefined,
+				external_surface_m2: formData.external_surface_m2 || undefined,
+				duration_minutes: formData.duration_minutes || undefined,
 				sample_rate_seconds: formData.sample_rate_seconds,
 				notes: formData.notes || undefined
 			});
 			showModal = false;
 			formData = {
 				truck_plate: '',
-				cell_dimensions: '',
-				duration_minutes: 30,
+				internal_surface_m2: null,
+				external_surface_m2: null,
+				duration_minutes: null,
 				sample_rate_seconds: 5,
 				notes: ''
 			};
@@ -141,12 +144,65 @@
 						<input type="text" id="truck_plate" bind:value={formData.truck_plate} required />
 					</div>
 					<div class="form-group">
-						<label for="cell_dimensions">Dimensioni Cella (opzionale)</label>
-						<input type="text" id="cell_dimensions" bind:value={formData.cell_dimensions} placeholder="es: 3x2x2 m" />
+						<label for="internal_surface_m2">Superficie Interna (m²)</label>
+						<input type="number" id="internal_surface_m2" bind:value={formData.internal_surface_m2} min="0" step="0.01" placeholder="es: 12.5" />
 					</div>
 					<div class="form-group">
-						<label for="duration_minutes">Durata Prova (minuti) *</label>
-						<input type="number" id="duration_minutes" bind:value={formData.duration_minutes} min="1" required />
+						<label for="external_surface_m2">Superficie Esterna (m²)</label>
+						<input type="number" id="external_surface_m2" bind:value={formData.external_surface_m2} min="0" step="0.01" placeholder="es: 15.2" />
+					</div>
+					<div class="form-group">
+						<label for="duration_minutes">Durata Prova</label>
+						<div class="duration-helpers">
+							<button 
+								type="button" 
+								class="duration-btn" 
+								class:active={formData.duration_minutes === 60}
+								on:click={() => formData.duration_minutes = 60}
+							>
+								1 ora
+							</button>
+							<button 
+								type="button" 
+								class="duration-btn" 
+								class:active={formData.duration_minutes === 360}
+								on:click={() => formData.duration_minutes = 360}
+							>
+								6 ore
+							</button>
+							<button 
+								type="button" 
+								class="duration-btn" 
+								class:active={formData.duration_minutes === 720}
+								on:click={() => formData.duration_minutes = 720}
+							>
+								12 ore
+							</button>
+							<button 
+								type="button" 
+								class="duration-btn" 
+								class:active={formData.duration_minutes === 1440}
+								on:click={() => formData.duration_minutes = 1440}
+							>
+								24 ore
+							</button>
+							<button 
+								type="button" 
+								class="duration-btn" 
+								class:active={formData.duration_minutes === null}
+								on:click={() => formData.duration_minutes = null}
+							>
+								Illimitata
+							</button>
+						</div>
+						<input 
+							type="number" 
+							id="duration_minutes" 
+							bind:value={formData.duration_minutes} 
+							min="1" 
+							placeholder="Oppure inserisci minuti personalizzati" 
+						/>
+						<small class="help-text">Seleziona una durata standard o inserisci un valore personalizzato. Lascia vuoto per durata illimitata.</small>
 					</div>
 					<div class="form-group">
 						<label for="sample_rate_seconds">Frequenza Campionamento (secondi) *</label>
@@ -180,7 +236,7 @@
 					<div class="session-card-body">
 						<div class="session-info">
 							<strong>Durata prevista:</strong>
-							<span>{session.duration_minutes} minuti</span>
+							<span>{session.duration_minutes ? `${session.duration_minutes} minuti` : 'Durata illimitata'}</span>
 						</div>
 						<div class="session-info">
 							<strong>Campionamento:</strong>
@@ -196,10 +252,16 @@
 								<span>{formatDate(session.started_at)}</span>
 							</div>
 						{/if}
-						{#if session.cell_dimensions}
+						{#if session.internal_surface_m2}
 							<div class="session-info">
-								<strong>Dimensioni cella:</strong>
-								<span>{session.cell_dimensions}</span>
+								<strong>Superficie interna:</strong>
+								<span>{session.internal_surface_m2} m²</span>
+							</div>
+						{/if}
+						{#if session.external_surface_m2}
+							<div class="session-info">
+								<strong>Superficie esterna:</strong>
+								<span>{session.external_surface_m2} m²</span>
 							</div>
 						{/if}
 					</div>
@@ -338,6 +400,50 @@
 		border-radius: 4px;
 		font-size: 1rem;
 		box-sizing: border-box;
+	}
+
+	.help-text {
+		display: block;
+		margin-top: 0.25rem;
+		font-size: 0.85rem;
+		color: #7f8c8d;
+		font-style: italic;
+	}
+
+	.duration-helpers {
+		display: flex;
+		gap: 0.5rem;
+		margin-bottom: 0.75rem;
+		flex-wrap: wrap;
+	}
+
+	.duration-btn {
+		padding: 0.5rem 1rem;
+		border: 2px solid #3498db;
+		background-color: white;
+		color: #3498db;
+		border-radius: 4px;
+		font-size: 0.9rem;
+		cursor: pointer;
+		transition: all 0.2s;
+		font-weight: 500;
+	}
+
+	.duration-btn:hover {
+		background-color: #ecf0f1;
+		border-color: #2980b9;
+		color: #2980b9;
+	}
+
+	.duration-btn.active {
+		background-color: #3498db;
+		color: white;
+		border-color: #3498db;
+	}
+
+	.duration-btn.active:hover {
+		background-color: #2980b9;
+		border-color: #2980b9;
 	}
 
 	.form-group input:focus,

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 	import { token as tokenStore, checkSession } from '$lib/stores/auth';
@@ -16,6 +16,28 @@
 	let fanChart: Chart | null = null;
 	let heaterPowerChart: Chart | null = null;
 	let fanPowerChart: Chart | null = null;
+	let heaterVoltageChart: Chart | null = null;
+	let fanVoltageChart: Chart | null = null;
+	let heaterFrequencyChart: Chart | null = null;
+	let fanFrequencyChart: Chart | null = null;
+
+	// Coefficiente U
+	let uCoefficient: any = null;
+	let tempInternal: number = 0;
+	let tempExternal: number = 0;
+	let calculatingU = false;
+	let uError: string | null = null;
+
+	// Modifica superfici
+	let editingSurfaces = false;
+	let editInternalSurface: number = 0;
+	let editExternalSurface: number = 0;
+	let updatingSurfaces = false;
+
+	// Auto-refresh
+	let refreshInterval: ReturnType<typeof setInterval> | null = null;
+	let lastRefreshTime: Date | null = null;
+	const REFRESH_INTERVAL_MS = 15000; // 15 secondi
 
 	const sessionId = parseInt($page.params.id);
 
@@ -29,9 +51,31 @@
 			}
 		}
 		await loadSessionData();
+		
+		// Avvia auto-refresh ogni 15 secondi
+		refreshInterval = setInterval(async () => {
+			// Non ricaricare se:
+			// - siamo in modalità modifica
+			// - la sessione è completata (i dati non cambiano più)
+			if (!editingSurfaces && !calculatingU && !updatingSurfaces && session?.status !== 'COMPLETED') {
+				await loadSessionData();
+				lastRefreshTime = new Date();
+			}
+		}, REFRESH_INTERVAL_MS);
+	});
+
+	onDestroy(() => {
+		// Pulisci l'intervallo quando il componente viene distrutto
+		if (refreshInterval) {
+			clearInterval(refreshInterval);
+			refreshInterval = null;
+		}
 	});
 
 	async function loadSessionData() {
+		// Salva la posizione di scroll corrente
+		const scrollPosition = window.scrollY || document.documentElement.scrollTop;
+		
 		try {
 			loading = true;
 			
@@ -51,12 +95,59 @@
 			// Crea grafici dopo un breve delay per assicurarsi che il DOM sia pronto
 			setTimeout(() => {
 				createCharts();
+				// Ripristina la posizione di scroll dopo che il DOM è stato aggiornato
+				requestAnimationFrame(() => {
+					window.scrollTo(0, scrollPosition);
+				});
 			}, 100);
+
+			// Carica coefficiente U se esiste
+			await loadUCoefficient();
 		} catch (error: any) {
 			console.error('Error loading session data:', error);
 			alert('Errore nel caricamento dei dati: ' + (error.message || 'Errore sconosciuto'));
 		} finally {
 			loading = false;
+			// Ripristina la posizione di scroll anche in caso di errore
+			requestAnimationFrame(() => {
+				window.scrollTo(0, scrollPosition);
+			});
+		}
+	}
+
+	async function loadUCoefficient() {
+		try {
+			uCoefficient = await api.getUCoefficient(sessionId);
+			if (uCoefficient) {
+				tempInternal = uCoefficient.temp_internal_avg;
+				tempExternal = uCoefficient.temp_external_avg;
+			}
+		} catch (error: any) {
+			console.error('Error loading U coefficient:', error);
+			// Non è un errore critico, potrebbe semplicemente non essere ancora calcolato
+		}
+	}
+
+	async function calculateU() {
+		if (!tempInternal || !tempExternal) {
+			uError = 'Inserire entrambe le temperature';
+			return;
+		}
+
+		if (tempInternal <= tempExternal) {
+			uError = 'La temperatura interna deve essere maggiore della temperatura esterna';
+			return;
+		}
+
+		try {
+			calculatingU = true;
+			uError = null;
+			uCoefficient = await api.calculateUCoefficient(sessionId, tempInternal, tempExternal);
+		} catch (error: any) {
+			uError = error.message || 'Errore nel calcolo del coefficiente U';
+			console.error('Error calculating U coefficient:', error);
+		} finally {
+			calculatingU = false;
 		}
 	}
 
@@ -64,8 +155,12 @@
 		// Distruggi grafici esistenti se presenti
 		if (heaterChart) heaterChart.destroy();
 		if (heaterPowerChart) heaterPowerChart.destroy();
+		if (heaterVoltageChart) heaterVoltageChart.destroy();
+		if (heaterFrequencyChart) heaterFrequencyChart.destroy();
 		if (fanChart) fanChart.destroy();
 		if (fanPowerChart) fanPowerChart.destroy();
+		if (fanVoltageChart) fanVoltageChart.destroy();
+		if (fanFrequencyChart) fanFrequencyChart.destroy();
 
 		// Grafico energia heater
 		const heaterEnergyCtx = document.getElementById('heater-energy-chart') as HTMLCanvasElement;
@@ -194,10 +289,167 @@
 				}
 			});
 		}
+
+		// Grafico tensione heater
+		const heaterVoltageCtx = document.getElementById('heater-voltage-chart') as HTMLCanvasElement;
+		if (heaterVoltageCtx && heaterData.length > 0 && heaterData.some(d => d.voltage_v != null)) {
+			heaterVoltageChart = new Chart(heaterVoltageCtx, {
+				type: 'line',
+				data: {
+					labels: heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
+					datasets: [{
+						label: 'Tensione (V)',
+						data: heaterData.map(d => d.voltage_v),
+						borderColor: 'rgb(155, 89, 182)',
+						backgroundColor: 'rgba(155, 89, 182, 0.1)',
+						tension: 0.1
+					}]
+				},
+				options: {
+					responsive: true,
+					plugins: {
+						title: {
+							display: true,
+							text: 'Tensione - Stufa'
+						}
+					},
+					scales: {
+						y: {
+							beginAtZero: false
+						}
+					}
+				}
+			});
+		}
+
+		// Grafico frequenza heater
+		const heaterFrequencyCtx = document.getElementById('heater-frequency-chart') as HTMLCanvasElement;
+		if (heaterFrequencyCtx && heaterData.length > 0 && heaterData.some(d => d.frequency_hz != null)) {
+			heaterFrequencyChart = new Chart(heaterFrequencyCtx, {
+				type: 'line',
+				data: {
+					labels: heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
+					datasets: [{
+						label: 'Frequenza (Hz)',
+						data: heaterData.map(d => d.frequency_hz),
+						borderColor: 'rgb(241, 196, 15)',
+						backgroundColor: 'rgba(241, 196, 15, 0.1)',
+						tension: 0.1
+					}]
+				},
+				options: {
+					responsive: true,
+					plugins: {
+						title: {
+							display: true,
+							text: 'Frequenza - Stufa'
+						}
+					},
+					scales: {
+						y: {
+							beginAtZero: false
+						}
+					}
+				}
+			});
+		}
+
+		// Grafico tensione fan
+		const fanVoltageCtx = document.getElementById('fan-voltage-chart') as HTMLCanvasElement;
+		if (fanVoltageCtx && fanData.length > 0 && fanData.some(d => d.voltage_v != null)) {
+			fanVoltageChart = new Chart(fanVoltageCtx, {
+				type: 'line',
+				data: {
+					labels: fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
+					datasets: [{
+						label: 'Tensione (V)',
+						data: fanData.map(d => d.voltage_v),
+						borderColor: 'rgb(155, 89, 182)',
+						backgroundColor: 'rgba(155, 89, 182, 0.1)',
+						tension: 0.1
+					}]
+				},
+				options: {
+					responsive: true,
+					plugins: {
+						title: {
+							display: true,
+							text: 'Tensione - Ventilatore'
+						}
+					},
+					scales: {
+						y: {
+							beginAtZero: false
+						}
+					}
+				}
+			});
+		}
+
+		// Grafico frequenza fan
+		const fanFrequencyCtx = document.getElementById('fan-frequency-chart') as HTMLCanvasElement;
+		if (fanFrequencyCtx && fanData.length > 0 && fanData.some(d => d.frequency_hz != null)) {
+			fanFrequencyChart = new Chart(fanFrequencyCtx, {
+				type: 'line',
+				data: {
+					labels: fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
+					datasets: [{
+						label: 'Frequenza (Hz)',
+						data: fanData.map(d => d.frequency_hz),
+						borderColor: 'rgb(241, 196, 15)',
+						backgroundColor: 'rgba(241, 196, 15, 0.1)',
+						tension: 0.1
+					}]
+				},
+				options: {
+					responsive: true,
+					plugins: {
+						title: {
+							display: true,
+							text: 'Frequenza - Ventilatore'
+						}
+					},
+					scales: {
+						y: {
+							beginAtZero: false
+						}
+					}
+				}
+			});
+		}
 	}
 
 	function formatDate(dateString: string) {
 		return new Date(dateString).toLocaleString('it-IT');
+	}
+
+	async function startSession() {
+		if (!session) return;
+		if (!confirm('Avviare l\'acquisizione dati per questa sessione?')) return;
+		try {
+			await api.startSession(sessionId);
+			await loadSessionData(); // Ricarica i dati per aggiornare lo stato
+		} catch (error: any) {
+			// Estrai il messaggio di errore dalla risposta
+			let errorMsg = 'Impossibile avviare la sessione';
+			if (error.detail) {
+				errorMsg = error.detail;
+			} else if (error.message) {
+				errorMsg = error.message;
+			}
+			alert(errorMsg);
+		}
+	}
+
+	async function stopSession() {
+		if (!session) return;
+		if (!confirm('Fermare l\'acquisizione dati?')) return;
+		try {
+			await api.stopSession(sessionId);
+			await loadSessionData(); // Ricarica i dati per aggiornare lo stato
+		} catch (error: any) {
+			alert('Errore: ' + (error.message || 'Impossibile fermare la sessione'));
+		}
 	}
 
 	async function exportCSV() {
@@ -231,6 +483,45 @@
 			alert('Errore: ' + (error.message || 'Errore sconosciuto'));
 		}
 	}
+
+	function startEditSurfaces() {
+		if (session) {
+			editInternalSurface = session.internal_surface_m2 || 0;
+			editExternalSurface = session.external_surface_m2 || 0;
+			editingSurfaces = true;
+		}
+	}
+
+	function cancelEditSurfaces() {
+		editingSurfaces = false;
+		editInternalSurface = 0;
+		editExternalSurface = 0;
+	}
+
+	async function saveSurfaces() {
+		if (!session) return;
+
+		try {
+			updatingSurfaces = true;
+			const updated = await api.updateSession(sessionId, {
+				internal_surface_m2: editInternalSurface || undefined,
+				external_surface_m2: editExternalSurface || undefined
+			});
+			
+			// Aggiorna la sessione locale
+			session = updated;
+			editingSurfaces = false;
+			
+			// Se c'è un coefficiente U calcolato, potrebbe essere necessario ricalcolarlo
+			// (ma non lo facciamo automaticamente, l'utente può ricalcolarlo se vuole)
+			
+			alert('Superfici aggiornate con successo');
+		} catch (error: any) {
+			alert('Errore: ' + (error.message || 'Impossibile aggiornare le superfici'));
+		} finally {
+			updatingSurfaces = false;
+		}
+	}
 </script>
 
 <svelte:head>
@@ -241,7 +532,21 @@
 	<div class="session-header">
 		<button class="btn btn-secondary" on:click={() => goto('/')}>← Torna alla Dashboard</button>
 		<h2>Sessione #{sessionId} - {session?.truck_plate || 'Caricamento...'}</h2>
-		<button class="btn btn-primary" on:click={exportCSV}>Esporta CSV</button>
+		<div class="header-info">
+			{#if lastRefreshTime}
+				<span class="refresh-indicator" title="Ultimo aggiornamento: {lastRefreshTime.toLocaleTimeString('it-IT')}">
+					🔄 Aggiornamento automatico ogni 15s
+				</span>
+			{/if}
+		</div>
+		<div class="header-actions">
+			{#if session?.status === 'IDLE'}
+				<button class="btn btn-success" on:click={startSession}>Avvia Prova</button>
+			{:else if session?.status === 'RUNNING'}
+				<button class="btn btn-danger" on:click={stopSession}>Ferma Prova</button>
+			{/if}
+			<button class="btn btn-primary" on:click={exportCSV}>Esporta CSV</button>
+		</div>
 	</div>
 
 	{#if loading}
@@ -260,16 +565,56 @@
 				</div>
 				<div class="info-item">
 					<strong>Durata prevista:</strong>
-					<span>{session.duration_minutes} minuti</span>
+					<span>{session.duration_minutes ? `${session.duration_minutes} minuti` : 'Durata illimitata'}</span>
 				</div>
 				<div class="info-item">
 					<strong>Campionamento:</strong>
 					<span>{session.sample_rate_seconds} secondi</span>
 				</div>
-				{#if session.cell_dimensions}
-					<div class="info-item">
-						<strong>Dimensioni cella:</strong>
-						<span>{session.cell_dimensions}</span>
+				<div class="info-item surface-item">
+					<strong>Superficie interna:</strong>
+					{#if editingSurfaces}
+						<input
+							type="number"
+							bind:value={editInternalSurface}
+							step="0.01"
+							min="0"
+							class="surface-input"
+							placeholder="m²"
+						/>
+					{:else}
+						<span>{session.internal_surface_m2 || 'Non specificata'} {session.internal_surface_m2 ? 'm²' : ''}</span>
+					{/if}
+				</div>
+				<div class="info-item surface-item">
+					<strong>Superficie esterna:</strong>
+					{#if editingSurfaces}
+						<input
+							type="number"
+							bind:value={editExternalSurface}
+							step="0.01"
+							min="0"
+							class="surface-input"
+							placeholder="m²"
+						/>
+					{:else}
+						<span>{session.external_surface_m2 || 'Non specificata'} {session.external_surface_m2 ? 'm²' : ''}</span>
+					{/if}
+				</div>
+				{#if editingSurfaces}
+					<div class="info-item surface-actions">
+						<button class="btn btn-success" on:click={saveSurfaces} disabled={updatingSurfaces}>
+							{updatingSurfaces ? 'Salvataggio...' : 'Salva'}
+						</button>
+						<button class="btn btn-secondary" on:click={cancelEditSurfaces} disabled={updatingSurfaces}>
+							Annulla
+						</button>
+					</div>
+				{:else}
+					<div class="info-item surface-actions">
+						<button class="btn btn-primary" on:click={startEditSurfaces}>
+							Modifica Superfici
+						</button>
 					</div>
 				{/if}
 				<div class="info-item">
@@ -319,6 +664,18 @@
 							<label>Energia Totale:</label>
 							<span>{statistics.heater?.total_energy_kwh?.toFixed(3) || '0.000'} kWh</span>
 						</div>
+						{#if statistics.heater?.avg_voltage_v}
+							<div class="stat-value">
+								<label>Tensione Media:</label>
+								<span>{statistics.heater.avg_voltage_v.toFixed(1)} V</span>
+							</div>
+						{/if}
+						{#if statistics.heater?.avg_frequency_hz}
+							<div class="stat-value">
+								<label>Frequenza Media:</label>
+								<span>{statistics.heater.avg_frequency_hz.toFixed(2)} Hz</span>
+							</div>
+						{/if}
 						<div class="stat-value">
 							<label>Numero Misure:</label>
 							<span>{statistics.heater?.measurement_count || 0}</span>
@@ -345,10 +702,130 @@
 							<label>Energia Totale:</label>
 							<span>{statistics.fan?.total_energy_kwh?.toFixed(3) || '0.000'} kWh</span>
 						</div>
+						{#if statistics.fan?.avg_voltage_v}
+							<div class="stat-value">
+								<label>Tensione Media:</label>
+								<span>{statistics.fan.avg_voltage_v.toFixed(1)} V</span>
+							</div>
+						{/if}
+						{#if statistics.fan?.avg_frequency_hz}
+							<div class="stat-value">
+								<label>Frequenza Media:</label>
+								<span>{statistics.fan.avg_frequency_hz.toFixed(2)} Hz</span>
+							</div>
+						{/if}
 						<div class="stat-value">
 							<label>Numero Misure:</label>
 							<span>{statistics.fan?.measurement_count || 0}</span>
 						</div>
+					</div>
+				</div>
+			</div>
+		{/if}
+
+		<!-- Calcolatore Coefficiente U -->
+		{#if session.status === 'COMPLETED' && session.internal_surface_m2 && session.external_surface_m2}
+			<div class="u-coefficient-section">
+				<h3>Calcolo Coefficiente di Dispersione Termica (U)</h3>
+				
+				<!-- Formula esplicita -->
+				<div class="formula-section">
+					<h4>Formula di Calcolo</h4>
+					<div class="formula-box">
+						<div class="formula-step">
+							<strong>1. Superficie Equivalente (A_eq):</strong>
+							<div class="formula">A<sub>eq</sub> = √(A<sub>int</sub> × A<sub>ext</sub>)</div>
+							<div class="formula-desc">Media geometrica tra superficie interna ed esterna</div>
+						</div>
+						<div class="formula-step">
+							<strong>2. Potenza Media (P_media):</strong>
+							<div class="formula">P<sub>media</sub> = E<sub>tot</sub> / t</div>
+							<div class="formula-desc">Energia totale (Wh) divisa per durata prova (h) → risultato in W</div>
+						</div>
+						<div class="formula-step">
+							<strong>3. Differenza Temperatura (ΔT):</strong>
+							<div class="formula">ΔT = T<sub>int</sub> - T<sub>ext</sub></div>
+							<div class="formula-desc">Differenza tra temperatura media interna ed esterna (°C)</div>
+						</div>
+						<div class="formula-step highlight">
+							<strong>4. Coefficiente U (Trasmittanza Globale):</strong>
+							<div class="formula">U = P<sub>media</sub> / (A<sub>eq</sub> × ΔT)</div>
+							<div class="formula-desc">Unità: W/m²K (Watt per metro quadro per Kelvin)</div>
+						</div>
+					</div>
+				</div>
+				
+				<div class="u-coefficient-card">
+					{#if uError}
+						<div class="error-message">{uError}</div>
+					{/if}
+
+					{#if uCoefficient}
+						<!-- Risultato calcolato -->
+						<div class="u-result">
+							<h4>Risultato Calcolo</h4>
+							<div class="u-result-grid">
+								<div class="u-result-item">
+									<label>Superficie Equivalente (A_eq):</label>
+									<span>{uCoefficient.equivalent_surface_m2?.toFixed(2)} m²</span>
+									<small>√(A_int × A_ext) = √({session.internal_surface_m2} × {session.external_surface_m2})</small>
+								</div>
+								<div class="u-result-item">
+									<label>Potenza Media (P_media):</label>
+									<span>{uCoefficient.avg_power_w?.toFixed(2)} W</span>
+									<small>E_tot / durata</small>
+								</div>
+								<div class="u-result-item">
+									<label>Differenza Temperatura (ΔT):</label>
+									<span>{uCoefficient.delta_t?.toFixed(2)} °C</span>
+									<small>T_int - T_ext = {uCoefficient.temp_internal_avg} - {uCoefficient.temp_external_avg}</small>
+								</div>
+								<div class="u-result-item highlight">
+									<label>Coefficiente U (Trasmittanza Globale):</label>
+									<span class="u-value">{uCoefficient.u_value?.toFixed(4)} W/m²K</span>
+									<small>P_media / (A_eq × ΔT)</small>
+								</div>
+							</div>
+							<div class="u-meta">
+								<small>Calcolato il {new Date(uCoefficient.calculated_at).toLocaleString('it-IT')}</small>
+							</div>
+						</div>
+					{/if}
+
+					<!-- Form per inserire temperature -->
+					<div class="u-form">
+						<h4>{uCoefficient ? 'Ricalcola con nuove temperature' : 'Inserisci Temperature'}</h4>
+						<div class="u-form-grid">
+							<div class="form-group">
+								<label for="temp-internal">Temperatura Media Interna (°C) *</label>
+								<input
+									type="number"
+									id="temp-internal"
+									bind:value={tempInternal}
+									step="0.1"
+									required
+									placeholder="es. 20.0"
+								/>
+							</div>
+							<div class="form-group">
+								<label for="temp-external">Temperatura Media Esterna (°C) *</label>
+								<input
+									type="number"
+									id="temp-external"
+									bind:value={tempExternal}
+									step="0.1"
+									required
+									placeholder="es. 5.0"
+								/>
+							</div>
+						</div>
+						<button
+							class="btn btn-primary"
+							on:click={calculateU}
+							disabled={calculatingU}
+						>
+							{calculatingU ? 'Calcolo in corso...' : (uCoefficient ? 'Ricalcola' : 'Calcola Coefficiente U')}
+						</button>
 					</div>
 				</div>
 			</div>
@@ -364,6 +841,12 @@
 				<div class="chart-container">
 					<canvas id="heater-energy-chart"></canvas>
 				</div>
+				<div class="chart-container">
+					<canvas id="heater-voltage-chart"></canvas>
+				</div>
+				<div class="chart-container">
+					<canvas id="heater-frequency-chart"></canvas>
+				</div>
 			</div>
 		</div>
 
@@ -375,6 +858,12 @@
 				</div>
 				<div class="chart-container">
 					<canvas id="fan-energy-chart"></canvas>
+				</div>
+				<div class="chart-container">
+					<canvas id="fan-voltage-chart"></canvas>
+				</div>
+				<div class="chart-container">
+					<canvas id="fan-frequency-chart"></canvas>
 				</div>
 			</div>
 		</div>
@@ -394,12 +883,32 @@
 		align-items: center;
 		margin-bottom: 2rem;
 		gap: 1rem;
+		flex-wrap: wrap;
 	}
 
 	.session-header h2 {
 		flex: 1;
 		margin: 0;
 		font-size: 2rem;
+		min-width: 200px;
+	}
+
+	.header-info {
+		display: flex;
+		align-items: center;
+		gap: 1rem;
+	}
+
+	.refresh-indicator {
+		font-size: 0.85rem;
+		color: #7f8c8d;
+		opacity: 0.8;
+	}
+
+	.header-actions {
+		display: flex;
+		gap: 0.5rem;
+		flex-wrap: wrap;
 	}
 
 	.loading {
@@ -433,6 +942,34 @@
 	.info-item strong {
 		color: #7f8c8d;
 		font-size: 0.9rem;
+	}
+
+	.surface-item {
+		align-items: center;
+	}
+
+	.surface-input {
+		width: 120px;
+		padding: 0.5rem;
+		border: 1px solid #ddd;
+		border-radius: 4px;
+		font-size: 1rem;
+		text-align: right;
+	}
+
+	.surface-input:focus {
+		outline: none;
+		border-color: #3498db;
+		box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+	}
+
+	.surface-actions {
+		grid-column: span 2;
+		justify-content: flex-start;
+		gap: 0.5rem;
+		background: transparent;
+		padding: 0.5rem 0;
+		flex-direction: row;
 	}
 
 	.status-badge {
@@ -570,6 +1107,209 @@
 		background-color: #7f8c8d;
 	}
 
+	.btn-success {
+		background-color: #27ae60;
+		color: white;
+	}
+
+	.btn-success:hover {
+		background-color: #229954;
+	}
+
+	.btn-danger {
+		background-color: #e74c3c;
+		color: white;
+	}
+
+	.btn-danger:hover {
+		background-color: #c0392b;
+	}
+
+	.u-coefficient-section {
+		margin-bottom: 3rem;
+	}
+
+	.u-coefficient-section h3 {
+		margin-bottom: 1.5rem;
+		color: #2c3e50;
+		font-size: 1.5rem;
+	}
+
+	.formula-section {
+		background: #f8f9fa;
+		padding: 1.5rem;
+		border-radius: 8px;
+		margin-bottom: 2rem;
+		border-left: 4px solid #3498db;
+	}
+
+	.formula-section h4 {
+		margin: 0 0 1rem 0;
+		color: #2c3e50;
+		font-size: 1.2rem;
+	}
+
+	.formula-box {
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+	}
+
+	.formula-step {
+		background: white;
+		padding: 1rem;
+		border-radius: 4px;
+		border: 1px solid #ddd;
+	}
+
+	.formula-step.highlight {
+		background: #e8f5e9;
+		border: 2px solid #4caf50;
+	}
+
+	.formula-step strong {
+		display: block;
+		margin-bottom: 0.5rem;
+		color: #2c3e50;
+	}
+
+	.formula {
+		font-family: 'Courier New', monospace;
+		font-size: 1.1rem;
+		font-weight: 600;
+		color: #2c3e50;
+		margin: 0.5rem 0;
+		padding: 0.5rem;
+		background: #f8f9fa;
+		border-radius: 4px;
+		text-align: center;
+	}
+
+	.formula-step.highlight .formula {
+		background: #c8e6c9;
+		color: #2e7d32;
+		font-size: 1.2rem;
+	}
+
+	.formula-desc {
+		font-size: 0.9rem;
+		color: #666;
+		margin-top: 0.25rem;
+		font-style: italic;
+	}
+
+	.u-coefficient-card {
+		background: white;
+		padding: 2rem;
+		border-radius: 8px;
+		box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+	}
+
+	.error-message {
+		background: #fee;
+		color: #c33;
+		padding: 1rem;
+		border-radius: 4px;
+		margin-bottom: 1.5rem;
+		border-left: 4px solid #e74c3c;
+	}
+
+	.u-result {
+		margin-bottom: 2rem;
+		padding-bottom: 2rem;
+		border-bottom: 2px solid #ecf0f1;
+	}
+
+	.u-result h4 {
+		margin: 0 0 1rem 0;
+		color: #2c3e50;
+	}
+
+	.u-result-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+		gap: 1rem;
+	}
+
+	.u-result-item {
+		background: #f8f9fa;
+		padding: 1rem;
+		border-radius: 4px;
+	}
+
+	.u-result-item label {
+		display: block;
+		font-weight: 600;
+		color: #555;
+		margin-bottom: 0.5rem;
+		font-size: 0.9rem;
+	}
+
+	.u-result-item span {
+		display: block;
+		font-size: 1.3rem;
+		font-weight: 700;
+		color: #2c3e50;
+		margin-bottom: 0.25rem;
+	}
+
+	.u-result-item.highlight {
+		background: #e8f5e9;
+		border: 2px solid #4caf50;
+	}
+
+	.u-result-item.highlight .u-value {
+		color: #2e7d32;
+		font-size: 1.5rem;
+	}
+
+	.u-result-item small {
+		color: #777;
+		font-size: 0.85rem;
+	}
+
+	.u-meta {
+		margin-top: 1rem;
+		text-align: right;
+		color: #777;
+	}
+
+	.u-form h4 {
+		margin: 0 0 1rem 0;
+		color: #2c3e50;
+	}
+
+	.u-form-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+		gap: 1rem;
+		margin-bottom: 1.5rem;
+	}
+
+	.u-form .form-group {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.u-form .form-group label {
+		margin-bottom: 0.5rem;
+		font-weight: 500;
+		color: #555;
+	}
+
+	.u-form .form-group input {
+		padding: 0.75rem;
+		border: 1px solid #ddd;
+		border-radius: 4px;
+		font-size: 1rem;
+	}
+
+	.u-form .form-group input:focus {
+		outline: none;
+		border-color: #3498db;
+		box-shadow: 0 0 0 2px rgba(52, 152, 219, 0.2);
+	}
+
 	@media (max-width: 768px) {
 		.session-header {
 			flex-direction: column;
@@ -582,6 +1322,14 @@
 
 		.chart-container {
 			height: 300px;
+		}
+
+		.u-result-grid {
+			grid-template-columns: 1fr;
+		}
+
+		.u-form-grid {
+			grid-template-columns: 1fr;
 		}
 	}
 </style>

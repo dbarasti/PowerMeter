@@ -31,9 +31,10 @@ async function authenticatedFetch(url: string, options: RequestInit = {}): Promi
 export interface TestSession {
 	id: number;
 	truck_plate: string;
-	cell_dimensions?: string;
+	internal_surface_m2?: number;
+	external_surface_m2?: number;
 	notes?: string;
-	duration_minutes: number;
+	duration_minutes: number | null;
 	sample_rate_seconds: number;
 	status: string;
 	started_at?: string;
@@ -44,8 +45,9 @@ export interface TestSession {
 
 export interface CreateSessionData {
 	truck_plate: string;
-	cell_dimensions?: string;
-	duration_minutes: number;
+	internal_surface_m2?: number;
+	external_surface_m2?: number;
+	duration_minutes?: number;
 	sample_rate_seconds: number;
 	notes?: string;
 }
@@ -107,6 +109,44 @@ export const api = {
 	async getChartData(sessionId: number, deviceType: 'heater' | 'fan'): Promise<any> {
 		const response = await authenticatedFetch(`/api/data/sessions/${sessionId}/chart/${deviceType}`);
 		if (!response.ok) throw new Error('Failed to fetch chart data');
+		return response.json();
+	},
+
+	async calculateUCoefficient(sessionId: number, tempInternal: number, tempExternal: number): Promise<any> {
+		const response = await authenticatedFetch(`/api/data/sessions/${sessionId}/u-coefficient`, {
+			method: 'POST',
+			body: JSON.stringify({
+				temp_internal_avg: tempInternal,
+				temp_external_avg: tempExternal
+			})
+		});
+		if (!response.ok) {
+			const error = await response.json();
+			throw new Error(error.detail || 'Failed to calculate U coefficient');
+		}
+		return response.json();
+	},
+
+	async getUCoefficient(sessionId: number): Promise<any> {
+		const response = await authenticatedFetch(`/api/data/sessions/${sessionId}/u-coefficient`);
+		if (!response.ok) {
+			if (response.status === 404) {
+				return null; // Coefficiente non ancora calcolato
+			}
+			throw new Error('Failed to fetch U coefficient');
+		}
+		return response.json();
+	},
+
+	async updateSession(sessionId: number, data: { internal_surface_m2?: number; external_surface_m2?: number; notes?: string }): Promise<TestSession> {
+		const response = await authenticatedFetch(`/api/sessions/${sessionId}`, {
+			method: 'PUT',
+			body: JSON.stringify(data)
+		});
+		if (!response.ok) {
+			const error = await response.json();
+			throw new Error(error.detail || 'Failed to update session');
+		}
 		return response.json();
 	}
 };

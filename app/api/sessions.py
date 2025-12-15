@@ -31,24 +31,27 @@ def set_acquisition_service(service: AcquisitionService):
 # Pydantic models
 class TestSessionCreate(BaseModel):
     truck_plate: str
-    duration_minutes: int
+    duration_minutes: Optional[int] = None  # None = durata illimitata
     sample_rate_seconds: int = 5
-    cell_dimensions: Optional[str] = None
+    internal_surface_m2: Optional[float] = None
+    external_surface_m2: Optional[float] = None
     notes: Optional[str] = None
 
 
 class TestSessionUpdate(BaseModel):
     truck_plate: Optional[str] = None
-    cell_dimensions: Optional[str] = None
+    internal_surface_m2: Optional[float] = None
+    external_surface_m2: Optional[float] = None
     notes: Optional[str] = None
 
 
 class TestSessionResponse(BaseModel):
     id: int
     truck_plate: str
-    cell_dimensions: Optional[str]
+    internal_surface_m2: Optional[float]
+    external_surface_m2: Optional[float]
     notes: Optional[str]
-    duration_minutes: int
+    duration_minutes: Optional[int]  # None = durata illimitata
     sample_rate_seconds: int
     status: str
     started_at: Optional[str]
@@ -65,7 +68,8 @@ def session_to_dict(session: TestSession) -> dict:
     return {
         "id": session.id,
         "truck_plate": session.truck_plate,
-        "cell_dimensions": session.cell_dimensions,
+        "internal_surface_m2": session.internal_surface_m2,
+        "external_surface_m2": session.external_surface_m2,
         "notes": session.notes,
         "duration_minutes": session.duration_minutes,
         "sample_rate_seconds": session.sample_rate_seconds,
@@ -89,7 +93,8 @@ async def create_session(
         truck_plate=session_data.truck_plate,
         duration_minutes=session_data.duration_minutes,
         sample_rate_seconds=session_data.sample_rate_seconds,
-        cell_dimensions=session_data.cell_dimensions,
+        internal_surface_m2=session_data.internal_surface_m2,
+        external_surface_m2=session_data.external_surface_m2,
         notes=session_data.notes
     )
     return TestSessionResponse(**session_to_dict(session))
@@ -134,7 +139,8 @@ async def update_session(
     session = service.update_session(
         session_id=session_id,
         truck_plate=session_data.truck_plate,
-        cell_dimensions=session_data.cell_dimensions,
+        internal_surface_m2=session_data.internal_surface_m2,
+        external_surface_m2=session_data.external_surface_m2,
         notes=session_data.notes
     )
     if not session:

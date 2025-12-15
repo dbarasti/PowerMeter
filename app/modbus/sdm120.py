@@ -3,6 +3,7 @@ Driver Modbus RTU per Eastron SDM120 power meter.
 Gestisce comunicazione seriale, lettura registri e gestione errori.
 """
 import logging
+import struct
 from typing import Optional, Dict
 try:
     # pymodbus 3.x
@@ -30,18 +31,19 @@ class SDM120Reader:
     """
     Reader per Eastron SDM120 via Modbus RTU.
     
-    Registri SDM120 (holding registers, 16-bit):
-    - 0x0000: Voltage (V) - 1 decimal
-    - 0x0006: Power (W) - 0 decimals
-    - 0x0048: Total Active Energy (kWh) - 2 decimals
-    
-    Usiamo solo Power e Total Active Energy per questa applicazione.
+    Registri SDM120 (INPUT registers):
+    - 0x0000: Voltage (V) - IEEE 754 float 32-bit (2 registri) - Modbus 30001
+    - 0x0006: Active Power (W) - IEEE 754 float 32-bit (2 registri) - Modbus 30007
+    - 0x0046: Frequency (Hz) - IEEE 754 float 32-bit (2 registri) - Modbus 30071
+    - 0x0048: Total Active Energy (kWh) - IEEE 754 float 32-bit (2 registri) - Modbus 30073
     """
     
     # Indirizzi registri Modbus (decimali)
-    REGISTER_VOLTAGE = 0x0000
-    REGISTER_POWER = 0x0006
-    REGISTER_ENERGY = 0x0048
+    # Nota: gli indirizzi sono offset (0-based), non indirizzi Modbus (1-based)
+    REGISTER_VOLTAGE = 0x0000  # Modbus address 30001
+    REGISTER_POWER = 0x0006    # Modbus address 30007
+    REGISTER_FREQUENCY = 0x0046  # Modbus address 30071 (era 0x000C = 12, potrebbe essere sbagliato)
+    REGISTER_ENERGY = 0x0048    # Modbus address 30073
     
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
         """
@@ -118,12 +120,31 @@ class SDM120Reader:
                 logger.error(f"Errore chiusura Modbus: {e}")
     
     def is_connected(self) -> bool:
-        """Verifica se la connessione è attiva."""
-        return self._is_connected and self.client is not None
+        """
+        Verifica se la connessione è attiva.
+        Controlla anche che il client seriale sia effettivamente connesso.
+        """
+        if not self._is_connected or self.client is None:
+            return False
+        
+        # Verifica che il client sia effettivamente connesso
+        # (pymodbus può avere il flag ma la connessione seriale può essere caduta)
+        try:
+            # Prova a verificare lo stato della connessione
+            # In pymodbus 3.x, is_socket_open() verifica lo stato
+            if hasattr(self.client, 'is_socket_open'):
+                return self.client.is_socket_open()
+            # Fallback: se non disponibile, usa il flag interno
+            return self._is_connected
+        except Exception:
+            # Se c'è un errore nel controllo, considera disconnesso
+            self._is_connected = False
+            return False
     
     def read_power(self, slave_id: int) -> Optional[float]:
         """
         Legge la potenza istantanea (W) da un SDM120.
+        Nota: SDM120 usa INPUT REGISTERS e valori in formato IEEE 754 float (32-bit).
         
         Args:
             slave_id: ID Modbus dello slave (1 o 2)
@@ -137,10 +158,11 @@ class SDM120Reader:
         
         for attempt in range(ACQUISITION_CONFIG["max_retries"]):
             try:
-                # Legge 1 holding register a partire da 0x0006
-                result = self.client.read_holding_registers(
+                # SDM120 usa INPUT REGISTERS per i valori di misura
+                # Register 0x0006: Active Power (W) - formato IEEE 754 float (32-bit = 2 registri)
+                result = self.client.read_input_registers(
                     self.REGISTER_POWER,
-                    1,
+                    2,  # Legge 2 registri per float 32-bit
                     unit=slave_id
                 )
                 
@@ -150,8 +172,13 @@ class SDM120Reader:
                         time.sleep(ACQUISITION_CONFIG["retry_delay"])
                     continue
                 
-                # SDM120 restituisce valore come intero (W)
-                power = float(result.registers[0])
+                # SDM120 restituisce valori in formato IEEE 754 float (32-bit)
+                high_word = result.registers[0]
+                low_word = result.registers[1]
+                # Combina i due registri in un float (Big-Endian)
+                power_bytes = struct.pack('>HH', high_word, low_word)
+                power = struct.unpack('>f', power_bytes)[0]
+                
                 return power
                 
             except ModbusException as e:
@@ -167,6 +194,7 @@ class SDM120Reader:
     def read_energy(self, slave_id: int) -> Optional[float]:
         """
         Legge l'energia accumulata (kWh) da un SDM120.
+        Nota: SDM120 usa INPUT REGISTERS e valori in formato IEEE 754 float (32-bit).
         
         Args:
             slave_id: ID Modbus dello slave (1 o 2)
@@ -180,10 +208,11 @@ class SDM120Reader:
         
         for attempt in range(ACQUISITION_CONFIG["max_retries"]):
             try:
-                # Legge 2 holding registers a partire da 0x0048 (32-bit value)
-                result = self.client.read_holding_registers(
+                # SDM120 usa INPUT REGISTERS per i valori di misura
+                # Register 0x0048: Total Active Energy (kWh) - formato IEEE 754 float (32-bit = 2 registri)
+                result = self.client.read_input_registers(
                     self.REGISTER_ENERGY,
-                    2,
+                    2,  # Legge 2 registri per float 32-bit
                     unit=slave_id
                 )
                 
@@ -193,14 +222,13 @@ class SDM120Reader:
                         time.sleep(ACQUISITION_CONFIG["retry_delay"])
                     continue
                 
-                # SDM120 restituisce energia come 32-bit (2 registri)
-                # High word, Low word
+                # SDM120 restituisce valori in formato IEEE 754 float (32-bit)
                 high_word = result.registers[0]
                 low_word = result.registers[1]
-                # Combina i due registri (high << 16 | low)
-                energy_raw = (high_word << 16) | low_word
-                # Converti in kWh (valore è in Wh * 100, quindi dividi per 100000)
-                energy = energy_raw / 100000.0
+                # Combina i due registri in un float (Big-Endian)
+                energy_bytes = struct.pack('>HH', high_word, low_word)
+                energy = struct.unpack('>f', energy_bytes)[0]
+                
                 return energy
                 
             except ModbusException as e:
@@ -213,23 +241,190 @@ class SDM120Reader:
         
         return None
     
+    def read_voltage(self, slave_id: int) -> Optional[float]:
+        """
+        Legge la tensione (V) da un SDM120.
+        Nota: SDM120 usa INPUT REGISTERS e valori in formato IEEE 754 float (32-bit).
+        
+        Args:
+            slave_id: ID Modbus dello slave (1 o 2)
+            
+        Returns:
+            Tensione in Volt, None in caso di errore
+        """
+        if not self.is_connected():
+            logger.warning("Modbus non connesso")
+            return None
+        
+        for attempt in range(ACQUISITION_CONFIG["max_retries"]):
+            try:
+                # SDM120 usa INPUT REGISTERS per i valori di misura
+                # Register 0x0000: Voltage (V) - formato IEEE 754 float (32-bit = 2 registri)
+                result = self.client.read_input_registers(
+                    self.REGISTER_VOLTAGE,
+                    2,  # Legge 2 registri per float 32-bit
+                    unit=slave_id
+                )
+                
+                if result.isError():
+                    logger.warning(f"Errore lettura tensione (tentativo {attempt + 1})")
+                    if attempt < ACQUISITION_CONFIG["max_retries"] - 1:
+                        time.sleep(ACQUISITION_CONFIG["retry_delay"])
+                    continue
+                
+                # SDM120 restituisce valori in formato IEEE 754 float (32-bit)
+                # I registri sono in ordine Big-Endian: [High word, Low word]
+                high_word = result.registers[0]
+                low_word = result.registers[1]
+                # Combina i due registri in un float (Big-Endian)
+                # struct.pack crea bytes, struct.unpack interpreta come float
+                voltage_bytes = struct.pack('>HH', high_word, low_word)  # > = big-endian, HH = 2 unsigned short
+                voltage = struct.unpack('>f', voltage_bytes)[0]  # f = float
+                
+                # Verifica se il valore è plausibile (0-500V)
+                if voltage < 0.0 or voltage > 500.0:
+                    logger.warning(
+                        f"Tensione anomala: {voltage}V da slave {slave_id}. "
+                        f"Potrebbe essere un errore di lettura o dispositivo non collegato."
+                    )
+                    return None
+                
+                # Log per debug
+                logger.debug(f"Tensione letta: {voltage}V da slave {slave_id}")
+                
+                return voltage
+                
+            except ModbusException as e:
+                logger.warning(f"ModbusException lettura tensione: {e} (tentativo {attempt + 1})")
+                if attempt < ACQUISITION_CONFIG["max_retries"] - 1:
+                    time.sleep(ACQUISITION_CONFIG["retry_delay"])
+            except Exception as e:
+                logger.error(f"Errore imprevisto lettura tensione: {e}")
+                return None
+        
+        return None
+    
+    def read_frequency(self, slave_id: int) -> Optional[float]:
+        """
+        Legge la frequenza (Hz) da un SDM120.
+        Nota: SDM120 usa INPUT REGISTERS e valori in formato IEEE 754 float (32-bit).
+        
+        Args:
+            slave_id: ID Modbus dello slave (1 o 2)
+            
+        Returns:
+            Frequenza in Hz, None in caso di errore
+        """
+        if not self.is_connected():
+            logger.warning("Modbus non connesso")
+            return None
+        
+        for attempt in range(ACQUISITION_CONFIG["max_retries"]):
+            try:
+                # SDM120 usa INPUT REGISTERS per i valori di misura
+                # Register 0x000C: Frequency (Hz) - formato IEEE 754 float (32-bit = 2 registri)
+                result = self.client.read_input_registers(
+                    self.REGISTER_FREQUENCY,
+                    2,  # Legge 2 registri per float 32-bit
+                    unit=slave_id
+                )
+                
+                if result.isError():
+                    logger.warning(f"Errore lettura frequenza (tentativo {attempt + 1})")
+                    if attempt < ACQUISITION_CONFIG["max_retries"] - 1:
+                        time.sleep(ACQUISITION_CONFIG["retry_delay"])
+                    continue
+                
+                # SDM120 restituisce valori in formato IEEE 754 float (32-bit)
+                high_word = result.registers[0]
+                low_word = result.registers[1]
+                
+                # Log per debug
+                logger.debug(
+                    f"Frequenza raw da slave {slave_id}: "
+                    f"high={high_word} (0x{high_word:04X}), "
+                    f"low={low_word} (0x{low_word:04X})"
+                )
+                
+                # Combina i due registri in un float (Big-Endian)
+                frequency_bytes = struct.pack('>HH', high_word, low_word)
+                frequency = struct.unpack('>f', frequency_bytes)[0]
+                
+                # Log sempre per diagnosticare
+                logger.info(
+                    f"Frequenza letta: {frequency}Hz (raw: {high_word}, {low_word}) "
+                    f"da slave {slave_id}"
+                )
+                
+                # Verifica se il valore è plausibile (45-55Hz)
+                # Se è 0.0, potrebbe essere un errore di lettura o registro sbagliato
+                if frequency == 0.0:
+                    logger.warning(
+                        f"Frequenza letta come 0.0Hz da slave {slave_id}. "
+                        f"Potrebbe essere un errore di lettura o registro errato."
+                    )
+                    # Non restituiamo None per 0, ma loggiamo il warning
+                    # Potrebbe essere che il dispositivo non misuri la frequenza
+                
+                if frequency < 0.0 or (frequency > 55.0 and frequency != 0.0):
+                    logger.warning(
+                        f"Frequenza anomala: {frequency}Hz da slave {slave_id}. "
+                        f"Potrebbe essere un errore di lettura."
+                    )
+                    return None
+                
+                return frequency
+                
+            except ModbusException as e:
+                logger.warning(f"ModbusException lettura frequenza: {e} (tentativo {attempt + 1})")
+                if attempt < ACQUISITION_CONFIG["max_retries"] - 1:
+                    time.sleep(ACQUISITION_CONFIG["retry_delay"])
+            except Exception as e:
+                logger.error(f"Errore imprevisto lettura frequenza: {e}")
+                return None
+        
+        return None
+    
     def read_all(self, slave_id: int) -> Optional[Dict[str, float]]:
         """
-        Legge potenza ed energia in una singola chiamata.
+        Legge tutti i parametri (tensione, frequenza, potenza, energia) in una singola chiamata.
         
         Args:
             slave_id: ID Modbus dello slave
             
         Returns:
-            Dict con 'power_w' e 'energy_kwh', None in caso di errore
+            Dict con 'voltage_v', 'frequency_hz', 'power_w' e 'energy_kwh', None in caso di errore
         """
+        voltage = self.read_voltage(slave_id)
+        frequency = self.read_frequency(slave_id)
         power = self.read_power(slave_id)
         energy = self.read_energy(slave_id)
         
+        # Considera la lettura valida se almeno potenza ed energia sono disponibili
         if power is None or energy is None:
+            logger.debug(f"Lettura fallita per slave {slave_id}: power={power}, energy={energy}")
             return None
         
+        # Verifica che i valori siano plausibili
+        # Se tensione è > 500V, è chiaramente un errore
+        if voltage is not None and voltage > 500.0:
+            logger.warning(
+                f"Tensione anomala {voltage}V da slave {slave_id}. "
+                f"Impostando a None."
+            )
+            voltage = None
+        
+        # Se frequenza è fuori range 45-55Hz, potrebbe essere un errore
+        if frequency is not None and (frequency < 45.0 or frequency > 55.0):
+            logger.warning(
+                f"Frequenza anomala {frequency}Hz da slave {slave_id}. "
+                f"Impostando a None."
+            )
+            frequency = None
+        
         return {
+            "voltage_v": voltage,
+            "frequency_hz": frequency,
             "power_w": power,
             "energy_kwh": energy,
         }

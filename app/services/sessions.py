@@ -22,9 +22,10 @@ class SessionService:
     def create_session(
         self,
         truck_plate: str,
-        duration_minutes: int,
+        duration_minutes: Optional[int] = None,
         sample_rate_seconds: int = 5,
-        cell_dimensions: Optional[str] = None,
+        internal_surface_m2: Optional[float] = None,
+        external_surface_m2: Optional[float] = None,
         notes: Optional[str] = None
     ) -> TestSession:
         """
@@ -32,9 +33,10 @@ class SessionService:
         
         Args:
             truck_plate: Targa camion
-            duration_minutes: Durata prevista in minuti
+            duration_minutes: Durata prevista in minuti (None = durata illimitata)
             sample_rate_seconds: Frequenza campionamento in secondi
-            cell_dimensions: Dimensioni cella frigo (opzionale)
+            internal_surface_m2: Superficie interna in m² (opzionale)
+            external_surface_m2: Superficie esterna in m² (opzionale)
             notes: Note libere (opzionale)
             
         Returns:
@@ -44,7 +46,8 @@ class SessionService:
             truck_plate=truck_plate,
             duration_minutes=duration_minutes,
             sample_rate_seconds=sample_rate_seconds,
-            cell_dimensions=cell_dimensions,
+            internal_surface_m2=internal_surface_m2,
+            external_surface_m2=external_surface_m2,
             notes=notes,
             status=SessionStatus.IDLE.value
         )
@@ -83,17 +86,23 @@ class SessionService:
         self,
         session_id: int,
         truck_plate: Optional[str] = None,
-        cell_dimensions: Optional[str] = None,
+        internal_surface_m2: Optional[float] = None,
+        external_surface_m2: Optional[float] = None,
         notes: Optional[str] = None
     ) -> Optional[TestSession]:
         """
-        Aggiorna metadata di una sessione (solo se in stato IDLE).
+        Aggiorna metadata di una sessione.
+        
+        Le superfici (internal_surface_m2, external_surface_m2) e le note possono
+        essere modificate in qualsiasi stato (IDLE, RUNNING, COMPLETED).
+        La targa può essere modificata solo se la sessione è in stato IDLE.
         
         Args:
             session_id: ID sessione
-            truck_plate: Nuova targa (opzionale)
-            cell_dimensions: Nuove dimensioni (opzionale)
-            notes: Nuove note (opzionale)
+            truck_plate: Nuova targa (opzionale, solo se IDLE)
+            internal_surface_m2: Nuova superficie interna in m² (opzionale, sempre modificabile)
+            external_surface_m2: Nuova superficie esterna in m² (opzionale, sempre modificabile)
+            notes: Nuove note (opzionale, sempre modificabile)
             
         Returns:
             TestSession aggiornata, None se non trovata o non modificabile
@@ -102,20 +111,32 @@ class SessionService:
         if not session:
             return None
         
-        if session.status != SessionStatus.IDLE.value:
-            logger.warning(f"Impossibile modificare sessione {session_id}: stato={session.status}")
-            return None
-        
+        # Targa può essere modificata solo se IDLE
         if truck_plate is not None:
-            session.truck_plate = truck_plate
-        if cell_dimensions is not None:
-            session.cell_dimensions = cell_dimensions
+            if session.status != SessionStatus.IDLE.value:
+                logger.warning(
+                    f"Impossibile modificare targa per sessione {session_id}: "
+                    f"stato={session.status} (solo IDLE consentito)"
+                )
+            else:
+                session.truck_plate = truck_plate
+        
+        # Superfici e note possono essere sempre modificate
+        if internal_surface_m2 is not None:
+            session.internal_surface_m2 = internal_surface_m2
+        if external_surface_m2 is not None:
+            session.external_surface_m2 = external_surface_m2
         if notes is not None:
             session.notes = notes
         
         session.updated_at = datetime.utcnow()
         self.db.commit()
         self.db.refresh(session)
+        
+        logger.info(
+            f"Sessione {session_id} aggiornata (stato={session.status}, "
+            f"superfici modificate: {internal_surface_m2 is not None or external_surface_m2 is not None})"
+        )
         
         return session
     
