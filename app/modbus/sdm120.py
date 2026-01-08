@@ -33,7 +33,7 @@ class SDM120Reader:
     
     Registri SDM120 (INPUT registers):
     - 0x0000: Voltage (V) - IEEE 754 float 32-bit (2 registri) - Modbus 30001
-    - 0x0006: Active Power (W) - IEEE 754 float 32-bit (2 registri) - Modbus 30007
+    - 0x000C: Active Power (W) - IEEE 754 float 32-bit (2 registri) - Modbus 30013
     - 0x0046: Frequency (Hz) - IEEE 754 float 32-bit (2 registri) - Modbus 30071
     - 0x0048: Total Active Energy (kWh) - IEEE 754 float 32-bit (2 registri) - Modbus 30073
     """
@@ -41,8 +41,8 @@ class SDM120Reader:
     # Indirizzi registri Modbus (decimali)
     # Nota: gli indirizzi sono offset (0-based), non indirizzi Modbus (1-based)
     REGISTER_VOLTAGE = 0x0000  # Modbus address 30001
-    REGISTER_POWER = 0x0006    # Modbus address 30007
-    REGISTER_FREQUENCY = 0x0046  # Modbus address 30071 (era 0x000C = 12, potrebbe essere sbagliato)
+    REGISTER_POWER = 0x000C    # Modbus address 30013 (Active Power in W)
+    REGISTER_FREQUENCY = 0x0046  # Modbus address 30071
     REGISTER_ENERGY = 0x0048    # Modbus address 30073
     
     def __init__(self, port: str, baudrate: int = 9600, timeout: float = 1.0):
@@ -159,7 +159,7 @@ class SDM120Reader:
         for attempt in range(ACQUISITION_CONFIG["max_retries"]):
             try:
                 # SDM120 usa INPUT REGISTERS per i valori di misura
-                # Register 0x0006: Active Power (W) - formato IEEE 754 float (32-bit = 2 registri)
+                # Register 0x000C (30013): Active Power (W) - formato IEEE 754 float (32-bit = 2 registri)
                 result = self.client.read_input_registers(
                     self.REGISTER_POWER,
                     2,  # Legge 2 registri per float 32-bit
@@ -175,9 +175,28 @@ class SDM120Reader:
                 # SDM120 restituisce valori in formato IEEE 754 float (32-bit)
                 high_word = result.registers[0]
                 low_word = result.registers[1]
-                # Combina i due registri in un float (Big-Endian)
+                
+                # Log per debug
+                logger.debug(
+                    f"Potenza raw da slave {slave_id}: "
+                    f"high={high_word} (0x{high_word:04X}), "
+                    f"low={low_word} (0x{low_word:04X})"
+                )
+                
+                # Prova prima Big-Endian (standard SDM120)
                 power_bytes = struct.pack('>HH', high_word, low_word)
                 power = struct.unpack('>f', power_bytes)[0]
+                
+                # Se il valore sembra anomalo (troppo piccolo o negativo), prova Little-Endian
+                if power < 0 or (power > 0 and power < 0.1):
+                    logger.debug(f"Tentativo Little-Endian per potenza (valore BE: {power}W)")
+                    power_bytes_le = struct.pack('<HH', high_word, low_word)
+                    power_le = struct.unpack('<f', power_bytes_le)[0]
+                    if power_le > 0 and power_le < 100000:  # Valore plausibile
+                        logger.info(f"Usando Little-Endian per potenza: {power_le}W (BE era {power}W)")
+                        power = power_le
+                
+                logger.debug(f"Potenza letta: {power}W da slave {slave_id}")
                 
                 return power
                 
