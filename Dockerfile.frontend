@@ -1,0 +1,38 @@
+# Dockerfile per frontend SvelteKit (multi-stage build)
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copia file di configurazione package
+COPY frontend/package.json frontend/package-lock.json ./
+
+# Installa dipendenze (usa npm per compatibilità)
+RUN npm ci
+
+# Copia tutto il codice frontend
+COPY frontend/ ./
+
+# Build dell'applicazione con adapter-node
+RUN npm run build
+
+# Stage di produzione con Node.js
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+
+# Installa wget e curl per healthcheck
+RUN apk add --no-cache wget curl
+
+# Copia i file buildati dallo stage builder
+COPY --from=builder /app/build ./build
+COPY --from=builder /app/package.json ./
+COPY --from=builder /app/node_modules ./node_modules
+
+# Espone la porta del frontend (SvelteKit adapter-node usa porta 3000 di default)
+ENV PORT=5173
+ENV HOST=0.0.0.0
+
+EXPOSE 5173
+
+# Avvia il server di produzione SvelteKit
+CMD ["node", "build"]
