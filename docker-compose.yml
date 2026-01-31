@@ -17,11 +17,12 @@ services:
       - ./data:/app/data:rw
       # Persistenza log
       - ./logs:/app/logs:rw
-      # Mapping porta seriale Modbus (se disponibile su Windows)
-      # Su Windows, la porta COM viene mappata come /dev/ttyS* o /dev/ttyUSB*
-      # Esempio: COM3 -> potrebbe essere /dev/ttyS2 o /dev/ttyUSB0
-      # Decommentare e configurare se necessario:
-      # - /dev/ttyUSB0:/dev/ttyUSB0:rw
+    devices:
+      # Mapping porta seriale Modbus per Windows
+      # Su Windows/WSL2, le porte COM vengono mappate come /dev/ttyS*
+      # COM1 = /dev/ttyS0, COM2 = /dev/ttyS1, COM3 = /dev/ttyS2, COM4 = /dev/ttyS3
+      # Se COM4 non funziona, prova anche /dev/ttyUSB0 o verifica con: docker compose exec backend ls -la /dev/tty*
+      - /dev/ttyS3:/dev/ttyUSB0:rw
     ports:
       - "8000:8000"
     networks:
