@@ -21,18 +21,20 @@ MODBUS_CONFIG = {
     "bytesize": 8,
     "parity": "N",
     "stopbits": 1,
-    "timeout": 1.0,  # secondi
-    "slave_ids": {
-        "heater": 1,  # SDM120 stufa
-        "fan": 2,     # SDM120 ventilatore
-    }
+    "timeout": 1.0,  # secondi - ridotto a 1s come nel tool che funziona
+    "inter_request_delay": 0.5,  # Delay tra richieste a fasi diverse (secondi)
+    "post_connect_delay": 0.5,  # Delay dopo connessione per stabilizzare (secondi)
+    "slave_id": 1,  # RS-PRO slave ID (singolo dispositivo)
+    # Configurazione fasi:
+    # Fase 1 = Stufa (Heater)
+    # Fase 2 = Ventilatore (Fan)
 }
 
 # Configurazione acquisizione dati
 ACQUISITION_CONFIG = {
     "default_sample_rate": 5,  # secondi tra una lettura e l'altra
     "max_retries": 3,
-    "retry_delay": 0.5,  # secondi
+    "retry_delay": 0.8,  # secondi - aumentato per daisy chain (più tempo tra retry)
 }
 
 # Configurazione autenticazione
@@ -57,4 +59,7 @@ WEB_CONFIG = {
     "title": "Thermal Test System",
     "refresh_interval": 2000,  # ms per aggiornamento live
 }
+
+# Configurazione fuso orario
+TIMEZONE = os.getenv("TIMEZONE", "Europe/Rome")  # Fuso orario per esportazione CSV
 

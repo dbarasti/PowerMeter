@@ -1,6 +1,6 @@
 """
 Servizio di acquisizione dati Modbus.
-Gestisce lettura periodica dai due SDM120 e salvataggio su database.
+Gestisce lettura periodica dai due RS-PRO e salvataggio su database.
 Thread-safe, gestisce errori e retry.
 """
 import logging
@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session
 
-from app.modbus.sdm120 import SDM120Reader
+from app.modbus.rspro import RSProReader
 from app.config import MODBUS_CONFIG, ACQUISITION_CONFIG
 from app.db.models import Measurement, TestSession, SessionStatus, DeviceType
 
@@ -32,7 +32,7 @@ class AcquisitionService:
             db: Sessione database SQLAlchemy
         """
         self.db = db
-        self.reader: Optional[SDM120Reader] = None
+        self.reader: Optional[RSProReader] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -70,7 +70,7 @@ class AcquisitionService:
             
             # Connetti Modbus se non già connesso
             if not self.reader or not self.reader.is_connected():
-                self.reader = SDM120Reader(
+                self.reader = RSProReader(
                     port=MODBUS_CONFIG["port"],
                     baudrate=MODBUS_CONFIG["baudrate"],
                     timeout=MODBUS_CONFIG["timeout"]
@@ -142,13 +142,13 @@ class AcquisitionService:
     def _acquisition_loop(self):
         """
         Loop principale di acquisizione dati.
-        Esegue letture periodiche dai due SDM120 e salva su database.
+        Esegue letture periodiche dai due RS-PRO e salva su database.
         Gestisce automaticamente disconnessioni e riconnessioni USB.
         Ferma automaticamente la sessione quando viene raggiunta la durata prevista.
         """
         logger.info("Thread acquisizione avviato")
         consecutive_errors = 0
-        max_consecutive_errors = 5  # Dopo 5 errori consecutivi, tenta riconnessione
+        max_consecutive_errors = 10  # Dopo 10 errori consecutivi, tenta riconnessione (aumentato per daisy chain)
         
         while self._running:
             try:
@@ -193,31 +193,54 @@ class AcquisitionService:
                         logger.info("Riconnessione Modbus riuscita")
                         consecutive_errors = 0
                 
-                # Leggi da entrambi i dispositivi
-                heater_data = self.reader.read_all(MODBUS_CONFIG["slave_ids"]["heater"])
-                fan_data = self.reader.read_all(MODBUS_CONFIG["slave_ids"]["fan"])
+                # Leggi da entrambe le fasi del dispositivo RS-PRO
+                # Fase 1 = Stufa (Heater), Fase 2 = Ventilatore (Fan)
+                slave_id = MODBUS_CONFIG.get("slave_id", 1)
                 
-                # Se entrambe le letture falliscono, potrebbe essere un problema di connessione
+                logger.debug("Lettura dati da Fase 1 (Stufa/Heater)...")
+                heater_data = self.reader.read_all(phase=1, slave_id=slave_id)
+                logger.debug(f"Risultato lettura heater: {heater_data is not None}")
+                
+                # Delay tra richieste a fasi diverse
+                inter_request_delay = MODBUS_CONFIG.get("inter_request_delay", 0.2)
+                if inter_request_delay > 0:
+                    logger.debug(f"Attesa {inter_request_delay}s prima di leggere Fase 2...")
+                    time.sleep(inter_request_delay)
+                
+                logger.debug("Lettura dati da Fase 2 (Ventilatore/Fan)...")
+                fan_data = self.reader.read_all(phase=2, slave_id=slave_id)
+                logger.debug(f"Risultato lettura fan: {fan_data is not None}")
+                
+                # Se entrambe le letture falliscono completamente, incrementa contatore errori
+                # Ma considera anche letture parziali (es. potenza ok ma tensione no)
                 if heater_data is None and fan_data is None:
                     consecutive_errors += 1
+                    logger.warning(
+                        f"Entrambe le letture fallite (heater e fan). "
+                        f"Errori consecutivi: {consecutive_errors}/{max_consecutive_errors}"
+                    )
                     if consecutive_errors >= max_consecutive_errors:
                         logger.warning(
-                            f"{consecutive_errors} letture consecutive fallite, "
+                            f"{consecutive_errors} letture consecutive completamente fallite, "
                             "tentativo di riconnessione..."
                         )
-                        self.reader.disconnect()
+                        try:
+                            self.reader.disconnect()
+                        except Exception as e:
+                            logger.debug(f"Errore durante disconnessione: {e}")
                         if not self._reconnect():
                             logger.error("Riconnessione fallita dopo errori multipli")
                             time.sleep(self._sample_rate * 2)
                             continue
                         else:
                             consecutive_errors = 0
-                    else:
-                        logger.debug(
-                            f"Lettura fallita (errori consecutivi: {consecutive_errors})"
-                        )
                 else:
-                    # Reset contatore errori se almeno una lettura riesce
+                    # Reset contatore errori se almeno una lettura riesce (anche parzialmente)
+                    if consecutive_errors > 0:
+                        logger.info(
+                            f"Lettura riuscita dopo {consecutive_errors} errori. "
+                            f"Heater: {heater_data is not None}, Fan: {fan_data is not None}"
+                        )
                     consecutive_errors = 0
                 
                 # Salva misure su database
@@ -226,9 +249,8 @@ class AcquisitionService:
                         self._current_session_id,
                         DeviceType.HEATER.value,
                         heater_data["power_w"],
-                        heater_data["energy_kwh"],
-                        heater_data.get("voltage_v"),
-                        heater_data.get("frequency_hz")
+                        voltage_v=heater_data.get("voltage_v"),
+                        frequency_hz=heater_data.get("frequency_hz")
                     )
                 
                 if fan_data:
@@ -236,9 +258,8 @@ class AcquisitionService:
                         self._current_session_id,
                         DeviceType.FAN.value,
                         fan_data["power_w"],
-                        fan_data["energy_kwh"],
-                        fan_data.get("voltage_v"),
-                        fan_data.get("frequency_hz")
+                        voltage_v=fan_data.get("voltage_v"),
+                        frequency_hz=fan_data.get("frequency_hz")
                     )
                 
                 # Attendi prima della prossima lettura
@@ -284,7 +305,7 @@ class AcquisitionService:
                     pass
             
             # Crea nuovo reader e connetti
-            self.reader = SDM120Reader(
+            self.reader = RSProReader(
                 port=MODBUS_CONFIG["port"],
                 baudrate=MODBUS_CONFIG["baudrate"],
                 timeout=MODBUS_CONFIG["timeout"]
@@ -306,33 +327,70 @@ class AcquisitionService:
         session_id: int,
         device_type: str,
         power_w: float,
-        energy_kwh: float,
+        energy_kwh: Optional[float] = None,  # Non più letta, calcoliamo dalla potenza
         voltage_v: Optional[float] = None,
         frequency_hz: Optional[float] = None
     ):
         """
         Salva una misura su database.
         
+        L'energia salvata è calcolata integrando la potenza nel tempo (energia della sessione),
+        non l'energia totale accumulata del dispositivo.
+        
         Args:
             session_id: ID sessione
             device_type: "heater" o "fan"
             power_w: Potenza in Watt
-            energy_kwh: Energia in kWh
+            energy_kwh: Energia letta dal dispositivo (non usata, calcoliamo dalla potenza)
             voltage_v: Tensione in Volt (opzionale)
             frequency_hz: Frequenza in Hz (opzionale)
         """
         try:
+            # Calcola energia cumulata dalla potenza
+            # Leggi l'ultima misurazione per questo device in questa sessione
+            last_measurement = self.db.query(Measurement).filter(
+                Measurement.session_id == session_id,
+                Measurement.device_type == device_type
+            ).order_by(Measurement.timestamp.desc()).first()
+            
+            current_timestamp = datetime.utcnow()
+            
+            if last_measurement:
+                # Calcola incremento energia dall'ultima misurazione
+                delta_time = (
+                    current_timestamp - last_measurement.timestamp
+                ).total_seconds() / 3600.0  # Converti in ore
+                
+                # Potenza media nell'intervallo (metodo del trapezio)
+                avg_power = (last_measurement.power_w + power_w) / 2.0
+                
+                # Energia nell'intervallo = potenza media * tempo (in ore)
+                # Risultato già in kWh (W * h / 1000 = kWh)
+                energy_increment = (avg_power * delta_time) / 1000.0
+                
+                # Energia cumulata = energia precedente + incremento
+                calculated_energy_kwh = last_measurement.energy_kwh + energy_increment
+            else:
+                # Prima misurazione della sessione: energia = 0
+                calculated_energy_kwh = 0.0
+            
             measurement = Measurement(
                 session_id=session_id,
                 device_type=device_type,
                 power_w=power_w,
-                energy_kwh=energy_kwh,
+                energy_kwh=calculated_energy_kwh,  # Usa energia calcolata
                 voltage_v=voltage_v,
                 frequency_hz=frequency_hz,
-                timestamp=datetime.utcnow()
+                timestamp=current_timestamp
             )
             self.db.add(measurement)
             self.db.commit()
+            
+            logger.debug(
+                f"Misura salvata: {device_type} - "
+                f"Potenza: {power_w}W, "
+                f"Energia calcolata: {calculated_energy_kwh:.4f}kWh"
+            )
         except Exception as e:
             logger.error(f"Errore salvataggio misura: {e}")
             self.db.rollback()

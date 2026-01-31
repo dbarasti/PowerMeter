@@ -60,12 +60,13 @@ class CalculationService:
                 continue
             
             powers = [m.power_w for m in measurements]
-            energies = [m.energy_kwh for m in measurements]
             voltages = [m.voltage_v for m in measurements if m.voltage_v is not None]
             frequencies = [m.frequency_hz for m in measurements if m.frequency_hz is not None]
             
-            # Energia totale = ultima energia - prima energia
-            total_energy = energies[-1] - energies[0] if len(energies) > 1 else 0.0
+            # Calcola energia cumulata dalla potenza (energia della sessione)
+            calculated_energies = self.calculate_energy_from_power(measurements)
+            # Energia totale = ultima energia calcolata (energia totale della sessione)
+            total_energy = calculated_energies[-1] if calculated_energies else 0.0
             
             stats[device_type] = {
                 "avg_power_w": sum(powers) / len(powers),
@@ -79,6 +80,52 @@ class CalculationService:
         
         return stats
     
+    def calculate_energy_from_power(
+        self,
+        measurements: List[Measurement]
+    ) -> List[float]:
+        """
+        Calcola energia cumulata (kWh) integrando la potenza nel tempo.
+        
+        Usa il metodo del trapezio per integrare la potenza tra i campioni.
+        Energia = integrale(P(t) dt) in kWh
+        
+        Args:
+            measurements: Lista di misurazioni ordinate per timestamp
+            
+        Returns:
+            Lista di energia cumulata in kWh per ogni misurazione
+        """
+        if len(measurements) < 2:
+            return [0.0] * len(measurements)
+        
+        energies = [0.0]  # Prima misurazione: energia = 0
+        
+        # Calcola energia per ogni intervallo usando metodo del trapezio
+        for i in range(1, len(measurements)):
+            prev_measurement = measurements[i-1]
+            curr_measurement = measurements[i]
+            
+            # Calcola delta tempo in ore
+            delta_time = (
+                curr_measurement.timestamp - prev_measurement.timestamp
+            ).total_seconds() / 3600.0
+            
+            # Potenza media nell'intervallo (metodo del trapezio)
+            avg_power = (
+                prev_measurement.power_w + curr_measurement.power_w
+            ) / 2.0
+            
+            # Energia nell'intervallo = potenza media * tempo (in ore)
+            # Risultato già in kWh (W * h / 1000 = kWh)
+            energy_increment = (avg_power * delta_time) / 1000.0
+            
+            # Aggiungi all'energia cumulata
+            cumulative_energy = energies[-1] + energy_increment
+            energies.append(cumulative_energy)
+        
+        return energies
+    
     def get_session_data_for_chart(
         self,
         session_id: int,
@@ -88,6 +135,9 @@ class CalculationService:
         """
         Recupera dati per grafico (timestamp, power, energy, voltage, frequency).
         
+        L'energia mostrata è calcolata integrando la potenza nel tempo (energia della sessione),
+        non l'energia totale accumulata del dispositivo.
+        
         Args:
             session_id: ID sessione
             device_type: "heater" o "fan"
@@ -95,21 +145,28 @@ class CalculationService:
             
         Returns:
             Lista di dict con keys: timestamp, power_w, energy_kwh, voltage_v, frequency_hz
+            energy_kwh è l'energia cumulata calcolata dalla potenza campionata
         """
         measurements = self.db.query(Measurement).filter(
             Measurement.session_id == session_id,
             Measurement.device_type == device_type
         ).order_by(Measurement.timestamp).limit(limit).all()
         
+        if not measurements:
+            return []
+        
+        # Calcola energia cumulata dalla potenza
+        calculated_energies = self.calculate_energy_from_power(measurements)
+        
         return [
             {
                 "timestamp": m.timestamp.isoformat(),
                 "power_w": m.power_w,
-                "energy_kwh": m.energy_kwh,
+                "energy_kwh": calculated_energies[i],  # Usa energia calcolata
                 "voltage_v": m.voltage_v,
                 "frequency_hz": m.frequency_hz
             }
-            for m in measurements
+            for i, m in enumerate(measurements)
         ]
     
     def calculate_u_coefficient(

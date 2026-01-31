@@ -37,7 +37,7 @@
 	// Auto-refresh
 	let refreshInterval: ReturnType<typeof setInterval> | null = null;
 	let lastRefreshTime: Date | null = null;
-	const REFRESH_INTERVAL_MS = 15000; // 15 secondi
+	const REFRESH_INTERVAL_MS = 1000; // 1s per aggiornamenti più frequenti e fluidi
 
 	const sessionId = parseInt($page.params.id);
 
@@ -52,13 +52,13 @@
 		}
 		await loadSessionData();
 		
-		// Avvia auto-refresh ogni 15 secondi
+		// Avvia auto-refresh ogni 5 secondi
 		refreshInterval = setInterval(async () => {
 			// Non ricaricare se:
 			// - siamo in modalità modifica
 			// - la sessione è completata (i dati non cambiano più)
 			if (!editingSurfaces && !calculatingU && !updatingSurfaces && session?.status !== 'COMPLETED') {
-				await loadSessionData();
+				await updateChartsData();
 				lastRefreshTime = new Date();
 			}
 		}, REFRESH_INTERVAL_MS);
@@ -115,6 +115,52 @@
 		}
 	}
 
+	// Funzione per aggiornare solo i dati dei grafici senza ricrearli
+	async function updateChartsData() {
+		try {
+			// Aggiorna sessione e statistiche in background
+			const [sessionData, statsData, heaterResponse, fanResponse] = await Promise.all([
+				api.getSession(sessionId),
+				api.getSessionStatistics(sessionId),
+				api.getChartData(sessionId, 'heater'),
+				api.getChartData(sessionId, 'fan')
+			]);
+
+			// Aggiorna i dati senza triggerare re-render della pagina
+			session = sessionData;
+			statistics = statsData;
+			const newHeaterData = heaterResponse.data || [];
+			const newFanData = fanResponse.data || [];
+
+			// Confronta i dati per vedere se sono cambiati (confronto efficiente)
+			const heaterChanged = newHeaterData.length !== heaterData.length || 
+				(newHeaterData.length > 0 && heaterData.length > 0 && 
+				 (newHeaterData[newHeaterData.length - 1].timestamp !== heaterData[heaterData.length - 1].timestamp ||
+				  newHeaterData[newHeaterData.length - 1].energy_kwh !== heaterData[heaterData.length - 1].energy_kwh));
+			
+			const fanChanged = newFanData.length !== fanData.length ||
+				(newFanData.length > 0 && fanData.length > 0 &&
+				 (newFanData[newFanData.length - 1].timestamp !== fanData[fanData.length - 1].timestamp ||
+				  newFanData[newFanData.length - 1].energy_kwh !== fanData[fanData.length - 1].energy_kwh));
+
+			if (heaterChanged || fanChanged) {
+				heaterData = newHeaterData;
+				fanData = newFanData;
+				
+				// Se i grafici non esistono ancora, creali
+				if (!heaterChart && !fanChart && (heaterData.length > 0 || fanData.length > 0)) {
+					createCharts();
+				} else {
+					// Altrimenti aggiorna solo i dati
+					updateCharts();
+				}
+			}
+		} catch (error: any) {
+			console.error('Error updating charts data:', error);
+			// Non mostrare alert per errori di aggiornamento automatico
+		}
+	}
+
 	async function loadUCoefficient() {
 		try {
 			uCoefficient = await api.getUCoefficient(sessionId);
@@ -148,6 +194,73 @@
 			console.error('Error calculating U coefficient:', error);
 		} finally {
 			calculatingU = false;
+		}
+	}
+
+	// Funzione per aggiornare i grafici esistenti senza ricrearli
+	function updateCharts() {
+		// Aggiorna grafico energia heater
+		if (heaterChart && heaterData.length > 0) {
+			heaterChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+			heaterChart.data.datasets[0].data = heaterData.map(d => d.energy_kwh);
+			heaterChart.update('none'); // 'none' = nessuna animazione per aggiornamento fluido
+		}
+
+		// Aggiorna grafico potenza heater
+		if (heaterPowerChart && heaterData.length > 0) {
+			heaterPowerChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+			heaterPowerChart.data.datasets[0].data = heaterData.map(d => d.power_w);
+			heaterPowerChart.update('none');
+		}
+
+		// Aggiorna grafico tensione heater (solo se esiste e ci sono dati)
+		if (heaterVoltageChart && heaterData.length > 0) {
+			if (heaterData.some(d => d.voltage_v != null)) {
+				heaterVoltageChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+				heaterVoltageChart.data.datasets[0].data = heaterData.map(d => d.voltage_v);
+				heaterVoltageChart.update('none');
+			}
+		}
+
+		// Aggiorna grafico frequenza heater (solo se esiste e ci sono dati)
+		if (heaterFrequencyChart && heaterData.length > 0) {
+			if (heaterData.some(d => d.frequency_hz != null)) {
+				heaterFrequencyChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+				heaterFrequencyChart.data.datasets[0].data = heaterData.map(d => d.frequency_hz);
+				heaterFrequencyChart.update('none');
+			}
+		}
+
+		// Aggiorna grafico energia fan
+		if (fanChart && fanData.length > 0) {
+			fanChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+			fanChart.data.datasets[0].data = fanData.map(d => d.energy_kwh);
+			fanChart.update('none');
+		}
+
+		// Aggiorna grafico potenza fan
+		if (fanPowerChart && fanData.length > 0) {
+			fanPowerChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+			fanPowerChart.data.datasets[0].data = fanData.map(d => d.power_w);
+			fanPowerChart.update('none');
+		}
+
+		// Aggiorna grafico tensione fan (solo se esiste e ci sono dati)
+		if (fanVoltageChart && fanData.length > 0) {
+			if (fanData.some(d => d.voltage_v != null)) {
+				fanVoltageChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+				fanVoltageChart.data.datasets[0].data = fanData.map(d => d.voltage_v);
+				fanVoltageChart.update('none');
+			}
+		}
+
+		// Aggiorna grafico frequenza fan (solo se esiste e ci sono dati)
+		if (fanFrequencyChart && fanData.length > 0) {
+			if (fanData.some(d => d.frequency_hz != null)) {
+				fanFrequencyChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
+				fanFrequencyChart.data.datasets[0].data = fanData.map(d => d.frequency_hz);
+				fanFrequencyChart.update('none');
+			}
 		}
 	}
 
@@ -471,7 +584,8 @@
 				const url = window.URL.createObjectURL(blob);
 				const a = document.createElement('a');
 				a.href = url;
-				a.download = `session_${sessionId}_${session?.truck_plate || 'data'}.csv`;
+				// Ora il file è un ZIP contenente più file CSV (uno per ogni ora)
+				a.download = `session_${sessionId}_${session?.truck_plate || 'data'}.zip`;
 				document.body.appendChild(a);
 				a.click();
 				document.body.removeChild(a);
@@ -535,7 +649,7 @@
 		<div class="header-info">
 			{#if lastRefreshTime}
 				<span class="refresh-indicator" title="Ultimo aggiornamento: {lastRefreshTime.toLocaleTimeString('it-IT')}">
-					🔄 Aggiornamento automatico ogni 15s
+					🔄 Aggiornamento automatico ogni 5s
 				</span>
 			{/if}
 		</div>
