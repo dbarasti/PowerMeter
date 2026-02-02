@@ -5,7 +5,7 @@ python-multipart>=0.0.9
 pydantic>=2.0.0
 
 # Database
-sqlalchemy==2.0.23
+sqlalchemy>=2.0.36
 
 # Autenticazione
 python-jose[cryptography]==3.3.0
