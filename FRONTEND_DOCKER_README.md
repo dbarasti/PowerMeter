@@ -6,8 +6,22 @@ Questa configurazione permette di eseguire solo il frontend in Docker mentre il 
 
 ### 1. Avvia il Backend in Locale
 
+**Su macOS/Linux:**
 ```bash
-# Assicurati di essere nella directory del progetto
+./start-backend-local.sh
+```
+
+**Su Windows:**
+```bash
+start-backend-local.bat
+```
+
+**Oppure manualmente:**
+```bash
+# Attiva ambiente virtuale (se presente)
+# macOS/Linux: source venv/bin/activate
+# Windows: venv\Scripts\activate
+
 python -m app.main
 ```
 
