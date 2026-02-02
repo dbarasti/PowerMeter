@@ -21,4 +21,5 @@ jinja2==3.1.2
 
 # Utilities
 python-dotenv==1.0.0
+tzdata>=2024.1  # Database IANA timezone (necessario su Windows per ZoneInfo)
 
