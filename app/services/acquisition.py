@@ -32,6 +32,7 @@ class AcquisitionService:
             db: Sessione database SQLAlchemy
         """
         self.db = db
+        self._db_factory = None  # Per ricreare sessioni in caso di errore
         self.reader: Optional[RSProReader] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -332,7 +333,7 @@ class AcquisitionService:
         frequency_hz: Optional[float] = None
     ):
         """
-        Salva una misura su database.
+        Salva una misura su database con retry logic per gestire errori I/O.
         
         L'energia salvata è calcolata integrando la potenza nel tempo (energia della sessione),
         non l'energia totale accumulata del dispositivo.
@@ -345,55 +346,98 @@ class AcquisitionService:
             voltage_v: Tensione in Volt (opzionale)
             frequency_hz: Frequenza in Hz (opzionale)
         """
-        try:
-            # Calcola energia cumulata dalla potenza
-            # Leggi l'ultima misurazione per questo device in questa sessione
-            last_measurement = self.db.query(Measurement).filter(
-                Measurement.session_id == session_id,
-                Measurement.device_type == device_type
-            ).order_by(Measurement.timestamp.desc()).first()
-            
-            current_timestamp = datetime.utcnow()
-            
-            if last_measurement:
-                # Calcola incremento energia dall'ultima misurazione
-                delta_time = (
-                    current_timestamp - last_measurement.timestamp
-                ).total_seconds() / 3600.0  # Converti in ore
+        from sqlalchemy.exc import OperationalError
+        import sqlite3
+        
+        max_retries = 3
+        retry_delay = 0.5  # secondi
+        
+        for attempt in range(max_retries):
+            try:
+                # Calcola energia cumulata dalla potenza
+                # Leggi l'ultima misurazione per questo device in questa sessione
+                last_measurement = self.db.query(Measurement).filter(
+                    Measurement.session_id == session_id,
+                    Measurement.device_type == device_type
+                ).order_by(Measurement.timestamp.desc()).first()
                 
-                # Potenza media nell'intervallo (metodo del trapezio)
-                avg_power = (last_measurement.power_w + power_w) / 2.0
+                current_timestamp = datetime.utcnow()
                 
-                # Energia nell'intervallo = potenza media * tempo (in ore)
-                # Risultato già in kWh (W * h / 1000 = kWh)
-                energy_increment = (avg_power * delta_time) / 1000.0
+                if last_measurement:
+                    # Calcola incremento energia dall'ultima misurazione
+                    delta_time = (
+                        current_timestamp - last_measurement.timestamp
+                    ).total_seconds() / 3600.0  # Converti in ore
+                    
+                    # Potenza media nell'intervallo (metodo del trapezio)
+                    avg_power = (last_measurement.power_w + power_w) / 2.0
+                    
+                    # Energia nell'intervallo = potenza media * tempo (in ore)
+                    # Risultato già in kWh (W * h / 1000 = kWh)
+                    energy_increment = (avg_power * delta_time) / 1000.0
+                    
+                    # Energia cumulata = energia precedente + incremento
+                    calculated_energy_kwh = last_measurement.energy_kwh + energy_increment
+                else:
+                    # Prima misurazione della sessione: energia = 0
+                    calculated_energy_kwh = 0.0
                 
-                # Energia cumulata = energia precedente + incremento
-                calculated_energy_kwh = last_measurement.energy_kwh + energy_increment
-            else:
-                # Prima misurazione della sessione: energia = 0
-                calculated_energy_kwh = 0.0
-            
-            measurement = Measurement(
-                session_id=session_id,
-                device_type=device_type,
-                power_w=power_w,
-                energy_kwh=calculated_energy_kwh,  # Usa energia calcolata
-                voltage_v=voltage_v,
-                frequency_hz=frequency_hz,
-                timestamp=current_timestamp
-            )
-            self.db.add(measurement)
-            self.db.commit()
-            
-            logger.debug(
-                f"Misura salvata: {device_type} - "
-                f"Potenza: {power_w}W, "
-                f"Energia calcolata: {calculated_energy_kwh:.4f}kWh"
-            )
-        except Exception as e:
-            logger.error(f"Errore salvataggio misura: {e}")
-            self.db.rollback()
+                measurement = Measurement(
+                    session_id=session_id,
+                    device_type=device_type,
+                    power_w=power_w,
+                    energy_kwh=calculated_energy_kwh,  # Usa energia calcolata
+                    voltage_v=voltage_v,
+                    frequency_hz=frequency_hz,
+                    timestamp=current_timestamp
+                )
+                self.db.add(measurement)
+                self.db.commit()
+                
+                logger.debug(
+                    f"Misura salvata: {device_type} - "
+                    f"Potenza: {power_w}W, "
+                    f"Energia calcolata: {calculated_energy_kwh:.4f}kWh"
+                )
+                return  # Successo, esci
+                
+            except (OperationalError, sqlite3.OperationalError) as e:
+                error_msg = str(e).lower()
+                is_io_error = "disk i/o error" in error_msg or "database is locked" in error_msg
+                
+                if is_io_error and attempt < max_retries - 1:
+                    # Errore I/O temporaneo, riprova
+                    logger.warning(
+                        f"Errore I/O database (tentativo {attempt + 1}/{max_retries}): {e}. "
+                        f"Riprovo tra {retry_delay}s..."
+                    )
+                    self.db.rollback()
+                    # Ricrea la sessione per evitare problemi di connessione
+                    try:
+                        self.db.close()
+                    except Exception:
+                        pass
+                    # Riapri la sessione usando la factory salvata
+                    if self._db_factory:
+                        self.db = self._db_factory()
+                    else:
+                        from app.db.database import SessionLocal
+                        self.db = SessionLocal()
+                    time.sleep(retry_delay * (attempt + 1))  # Backoff esponenziale
+                    continue
+                else:
+                    # Errore permanente o troppi tentativi
+                    logger.error(
+                        f"Errore salvataggio misura (tentativo {attempt + 1}/{max_retries}): {e}"
+                    )
+                    self.db.rollback()
+                    return  # Esci senza bloccare il loop
+                    
+            except Exception as e:
+                # Altri errori (non I/O)
+                logger.error(f"Errore salvataggio misura: {e}")
+                self.db.rollback()
+                return  # Esci senza bloccare il loop
     
     def shutdown(self):
         """

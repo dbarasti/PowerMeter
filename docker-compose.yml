@@ -22,7 +22,7 @@ services:
       # Su Windows/WSL2, le porte COM vengono mappate come /dev/ttyS*
       # COM1 = /dev/ttyS0, COM2 = /dev/ttyS1, COM3 = /dev/ttyS2, COM4 = /dev/ttyS3
       # Se COM4 non funziona, prova anche /dev/ttyUSB0 o verifica con: docker compose exec backend ls -la /dev/tty*
-      - /dev/ttyS3:/dev/ttyUSB0:rw
+      - /dev/ttyUSB0:/dev/ttyUSB0:rw
     ports:
       - "8000:8000"
     networks:

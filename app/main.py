@@ -74,8 +74,11 @@ async def lifespan(app: FastAPI):
     
     # Inizializza servizio acquisizione (non avviato, solo inizializzato)
     global acquisition_service
+    from app.db.database import SessionLocal
     db_session = next(get_db())
     acquisition_service = AcquisitionService(db_session)
+    # Salva factory per ricreare sessioni in caso di errore I/O
+    acquisition_service._db_factory = SessionLocal
     sessions.set_acquisition_service(acquisition_service)
     logger.info("Servizio acquisizione inizializzato")
     
