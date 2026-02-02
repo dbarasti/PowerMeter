@@ -130,7 +130,7 @@ class CalculationService:
         self,
         session_id: int,
         device_type: str,
-        limit: int = 1000
+        max_points: Optional[int] = None
     ) -> List[Dict]:
         """
         Recupera dati per grafico (timestamp, power, energy, voltage, frequency).
@@ -138,22 +138,30 @@ class CalculationService:
         L'energia mostrata è calcolata integrando la potenza nel tempo (energia della sessione),
         non l'energia totale accumulata del dispositivo.
         
+        Se ci sono più di max_points (default: nessun limite), applica downsampling intelligente
+        che mantiene i punti critici (min, max, inizio, fine) e campiona uniformemente il resto.
+        
         Args:
             session_id: ID sessione
             device_type: "heater" o "fan"
-            limit: Numero massimo di punti (per performance)
+            max_points: Numero massimo di punti (None = nessun limite, tutti i dati)
             
         Returns:
             Lista di dict con keys: timestamp, power_w, energy_kwh, voltage_v, frequency_hz
             energy_kwh è l'energia cumulata calcolata dalla potenza campionata
         """
+        # Recupera tutte le misurazioni (senza limite)
         measurements = self.db.query(Measurement).filter(
             Measurement.session_id == session_id,
             Measurement.device_type == device_type
-        ).order_by(Measurement.timestamp).limit(limit).all()
+        ).order_by(Measurement.timestamp).all()
         
         if not measurements:
             return []
+        
+        # Se max_points è specificato e ci sono più punti, applica downsampling intelligente
+        if max_points and len(measurements) > max_points:
+            measurements = self._downsample_measurements(measurements, max_points)
         
         # Calcola energia cumulata dalla potenza
         calculated_energies = self.calculate_energy_from_power(measurements)
@@ -168,6 +176,68 @@ class CalculationService:
             }
             for i, m in enumerate(measurements)
         ]
+    
+    def _downsample_measurements(
+        self,
+        measurements: List[Measurement],
+        target_count: int
+    ) -> List[Measurement]:
+        """
+        Downsampling intelligente che mantiene punti critici e campiona uniformemente.
+        
+        Mantiene sempre:
+        - Primo punto (inizio)
+        - Ultimo punto (fine)
+        - Punti con valore min/max di potenza
+        
+        Poi campiona uniformemente il resto per raggiungere target_count.
+        
+        Args:
+            measurements: Lista completa di misurazioni
+            target_count: Numero target di punti dopo downsampling
+            
+        Returns:
+            Lista di misurazioni downsampled
+        """
+        if len(measurements) <= target_count:
+            return measurements
+        
+        # Trova min e max di potenza
+        min_power_idx = min(range(len(measurements)), key=lambda i: measurements[i].power_w)
+        max_power_idx = max(range(len(measurements)), key=lambda i: measurements[i].power_w)
+        
+        # Indici critici da mantenere sempre
+        critical_indices = {0, len(measurements) - 1, min_power_idx, max_power_idx}
+        
+        # Calcola step per campionamento uniforme
+        # Sottraiamo i punti critici dal target
+        remaining_slots = target_count - len(critical_indices)
+        if remaining_slots <= 0:
+            # Se target_count è troppo piccolo, restituisci solo i punti critici
+            return [measurements[i] for i in sorted(critical_indices)]
+        
+        # Campiona uniformemente il resto
+        step = len(measurements) / remaining_slots
+        sampled_indices = set()
+        
+        for i in range(remaining_slots):
+            idx = int(i * step)
+            if idx < len(measurements):
+                sampled_indices.add(idx)
+        
+        # Combina indici critici e campionati
+        all_indices = sorted(critical_indices | sampled_indices)
+        
+        # Se abbiamo ancora troppi punti, prendi uniformemente
+        if len(all_indices) > target_count:
+            step = len(all_indices) / target_count
+            final_indices = [
+                all_indices[int(i * step)]
+                for i in range(target_count)
+            ]
+            all_indices = sorted(set(final_indices))
+        
+        return [measurements[i] for i in all_indices]
     
     def calculate_u_coefficient(
         self,

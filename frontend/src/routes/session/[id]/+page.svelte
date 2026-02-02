@@ -5,6 +5,7 @@
 	import { token as tokenStore, checkSession } from '$lib/stores/auth';
 	import { api, type TestSession } from '$lib/api';
 	import { get } from 'svelte/store';
+	import { browser } from '$app/environment';
 	import Chart from 'chart.js/auto';
 
 	let session: TestSession | null = null;
@@ -42,6 +43,17 @@
 	const sessionId = parseInt($page.params.id);
 
 	onMount(async () => {
+		// Importa e registra plugin zoom solo lato client (non durante SSR)
+		if (browser) {
+			try {
+				const zoomModule = await import('chartjs-plugin-zoom');
+				Chart.register(zoomModule.default);
+				await import('chartjs-adapter-date-fns');
+			} catch (error) {
+				console.error('Errore caricamento plugin zoom:', error);
+			}
+		}
+
 		const currentToken = get(tokenStore);
 		if (!currentToken) {
 			const isValid = await checkSession();
@@ -201,23 +213,29 @@
 	function updateCharts() {
 		// Aggiorna grafico energia heater
 		if (heaterChart && heaterData.length > 0) {
-			heaterChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-			heaterChart.data.datasets[0].data = heaterData.map(d => d.energy_kwh);
+			heaterChart.data.datasets[0].data = heaterData.map(d => ({
+				x: new Date(d.timestamp).getTime(),
+				y: d.energy_kwh
+			}));
 			heaterChart.update('none'); // 'none' = nessuna animazione per aggiornamento fluido
 		}
 
 		// Aggiorna grafico potenza heater
 		if (heaterPowerChart && heaterData.length > 0) {
-			heaterPowerChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-			heaterPowerChart.data.datasets[0].data = heaterData.map(d => d.power_w);
+			heaterPowerChart.data.datasets[0].data = heaterData.map(d => ({
+				x: new Date(d.timestamp).getTime(),
+				y: d.power_w
+			}));
 			heaterPowerChart.update('none');
 		}
 
 		// Aggiorna grafico tensione heater (solo se esiste e ci sono dati)
 		if (heaterVoltageChart && heaterData.length > 0) {
 			if (heaterData.some(d => d.voltage_v != null)) {
-				heaterVoltageChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-				heaterVoltageChart.data.datasets[0].data = heaterData.map(d => d.voltage_v);
+				heaterVoltageChart.data.datasets[0].data = heaterData.map(d => ({
+					x: new Date(d.timestamp).getTime(),
+					y: d.voltage_v
+				}));
 				heaterVoltageChart.update('none');
 			}
 		}
@@ -225,31 +243,39 @@
 		// Aggiorna grafico frequenza heater (solo se esiste e ci sono dati)
 		if (heaterFrequencyChart && heaterData.length > 0) {
 			if (heaterData.some(d => d.frequency_hz != null)) {
-				heaterFrequencyChart.data.labels = heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-				heaterFrequencyChart.data.datasets[0].data = heaterData.map(d => d.frequency_hz);
+				heaterFrequencyChart.data.datasets[0].data = heaterData.map(d => ({
+					x: new Date(d.timestamp).getTime(),
+					y: d.frequency_hz
+				}));
 				heaterFrequencyChart.update('none');
 			}
 		}
 
 		// Aggiorna grafico energia fan
 		if (fanChart && fanData.length > 0) {
-			fanChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-			fanChart.data.datasets[0].data = fanData.map(d => d.energy_kwh);
+			fanChart.data.datasets[0].data = fanData.map(d => ({
+				x: new Date(d.timestamp).getTime(),
+				y: d.energy_kwh
+			}));
 			fanChart.update('none');
 		}
 
 		// Aggiorna grafico potenza fan
 		if (fanPowerChart && fanData.length > 0) {
-			fanPowerChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-			fanPowerChart.data.datasets[0].data = fanData.map(d => d.power_w);
+			fanPowerChart.data.datasets[0].data = fanData.map(d => ({
+				x: new Date(d.timestamp).getTime(),
+				y: d.power_w
+			}));
 			fanPowerChart.update('none');
 		}
 
 		// Aggiorna grafico tensione fan (solo se esiste e ci sono dati)
 		if (fanVoltageChart && fanData.length > 0) {
 			if (fanData.some(d => d.voltage_v != null)) {
-				fanVoltageChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-				fanVoltageChart.data.datasets[0].data = fanData.map(d => d.voltage_v);
+				fanVoltageChart.data.datasets[0].data = fanData.map(d => ({
+					x: new Date(d.timestamp).getTime(),
+					y: d.voltage_v
+				}));
 				fanVoltageChart.update('none');
 			}
 		}
@@ -257,11 +283,90 @@
 		// Aggiorna grafico frequenza fan (solo se esiste e ci sono dati)
 		if (fanFrequencyChart && fanData.length > 0) {
 			if (fanData.some(d => d.frequency_hz != null)) {
-				fanFrequencyChart.data.labels = fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT'));
-				fanFrequencyChart.data.datasets[0].data = fanData.map(d => d.frequency_hz);
+				fanFrequencyChart.data.datasets[0].data = fanData.map(d => ({
+					x: new Date(d.timestamp).getTime(),
+					y: d.frequency_hz
+				}));
 				fanFrequencyChart.update('none');
 			}
 		}
+	}
+
+	// Funzione helper per creare opzioni comuni dei grafici con zoom/pan
+	function getChartOptions(title: string, beginAtZero: boolean = true) {
+		return {
+			responsive: true,
+			maintainAspectRatio: true,
+			parsing: false, // Migliora performance con molti dati
+			interaction: {
+				intersect: false,
+				mode: 'index' as const
+			},
+			plugins: {
+				title: {
+					display: true,
+					text: title
+				},
+				zoom: {
+					pan: {
+						enabled: true,
+						mode: 'x' as const,
+						modifierKey: 'ctrl' as const
+					},
+					zoom: {
+						wheel: {
+							enabled: true,
+							speed: 0.1
+						},
+						pinch: {
+							enabled: true
+						},
+						mode: 'x' as const,
+						drag: {
+							enabled: true,
+							modifierKey: 'shift' as const
+						}
+					}
+				},
+				legend: {
+					display: true
+				},
+				tooltip: {
+					enabled: true,
+					mode: 'index' as const,
+					intersect: false
+				}
+			},
+			scales: {
+				x: {
+					type: 'time' as const,
+					time: {
+						parser: 'yyyy-MM-dd\'T\'HH:mm:ss',
+						tooltipFormat: 'dd/MM/yyyy HH:mm:ss',
+						displayFormats: {
+							millisecond: 'HH:mm:ss.SSS',
+							second: 'HH:mm:ss',
+							minute: 'HH:mm',
+							hour: 'HH:mm',
+							day: 'dd/MM',
+							week: 'dd/MM',
+							month: 'MM/yyyy',
+							year: 'yyyy'
+						}
+					},
+					title: {
+						display: true,
+						text: 'Tempo'
+					}
+				},
+				y: {
+					beginAtZero: beginAtZero,
+					title: {
+						display: true
+					}
+				}
+			}
+		};
 	}
 
 	function createCharts() {
@@ -281,26 +386,36 @@
 			heaterChart = new Chart(heaterEnergyCtx, {
 				type: 'line',
 				data: {
-					labels: heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Energia (kWh)',
-						data: heaterData.map(d => d.energy_kwh),
+						data: heaterData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.energy_kwh
+						})),
 						borderColor: 'rgb(231, 76, 60)',
 						backgroundColor: 'rgba(231, 76, 60, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0, // Nascondi punti per performance
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
+					...getChartOptions('Energia Accumulata - Stufa', true),
+					scales: {
+						...getChartOptions('', true).scales,
+						y: {
+							...getChartOptions('', true).scales.y,
+							title: {
+								display: true,
+								text: 'Energia (kWh)'
+							}
+						}
+					},
 					plugins: {
+						...getChartOptions('', true).plugins,
 						title: {
 							display: true,
 							text: 'Energia Accumulata - Stufa'
-						}
-					},
-					scales: {
-						y: {
-							beginAtZero: true
 						}
 					}
 				}
@@ -313,26 +428,29 @@
 			heaterPowerChart = new Chart(heaterPowerCtx, {
 				type: 'line',
 				data: {
-					labels: heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Potenza (W)',
-						data: heaterData.map(d => d.power_w),
+						data: heaterData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.power_w
+						})),
 						borderColor: 'rgb(231, 76, 60)',
 						backgroundColor: 'rgba(231, 76, 60, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0,
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
-					plugins: {
-						title: {
-							display: true,
-							text: 'Potenza Istantanea - Stufa'
-						}
-					},
+					...getChartOptions('Potenza Istantanea - Stufa', true),
 					scales: {
+						...getChartOptions('', true).scales,
 						y: {
-							beginAtZero: true
+							...getChartOptions('', true).scales.y,
+							title: {
+								display: true,
+								text: 'Potenza (W)'
+							}
 						}
 					}
 				}
@@ -345,26 +463,29 @@
 			fanChart = new Chart(fanEnergyCtx, {
 				type: 'line',
 				data: {
-					labels: fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Energia (kWh)',
-						data: fanData.map(d => d.energy_kwh),
+						data: fanData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.energy_kwh
+						})),
 						borderColor: 'rgb(52, 152, 219)',
 						backgroundColor: 'rgba(52, 152, 219, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0,
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
-					plugins: {
-						title: {
-							display: true,
-							text: 'Energia Accumulata - Ventilatore'
-						}
-					},
+					...getChartOptions('Energia Accumulata - Ventilatore', true),
 					scales: {
+						...getChartOptions('', true).scales,
 						y: {
-							beginAtZero: true
+							...getChartOptions('', true).scales.y,
+							title: {
+								display: true,
+								text: 'Energia (kWh)'
+							}
 						}
 					}
 				}
@@ -377,26 +498,29 @@
 			fanPowerChart = new Chart(fanPowerCtx, {
 				type: 'line',
 				data: {
-					labels: fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Potenza (W)',
-						data: fanData.map(d => d.power_w),
+						data: fanData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.power_w
+						})),
 						borderColor: 'rgb(52, 152, 219)',
 						backgroundColor: 'rgba(52, 152, 219, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0,
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
-					plugins: {
-						title: {
-							display: true,
-							text: 'Potenza Istantanea - Ventilatore'
-						}
-					},
+					...getChartOptions('Potenza Istantanea - Ventilatore', true),
 					scales: {
+						...getChartOptions('', true).scales,
 						y: {
-							beginAtZero: true
+							...getChartOptions('', true).scales.y,
+							title: {
+								display: true,
+								text: 'Potenza (W)'
+							}
 						}
 					}
 				}
@@ -409,26 +533,29 @@
 			heaterVoltageChart = new Chart(heaterVoltageCtx, {
 				type: 'line',
 				data: {
-					labels: heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Tensione (V)',
-						data: heaterData.map(d => d.voltage_v),
+						data: heaterData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.voltage_v
+						})),
 						borderColor: 'rgb(155, 89, 182)',
 						backgroundColor: 'rgba(155, 89, 182, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0,
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
-					plugins: {
-						title: {
-							display: true,
-							text: 'Tensione - Stufa'
-						}
-					},
+					...getChartOptions('Tensione - Stufa', false),
 					scales: {
+						...getChartOptions('', false).scales,
 						y: {
-							beginAtZero: false
+							...getChartOptions('', false).scales.y,
+							title: {
+								display: true,
+								text: 'Tensione (V)'
+							}
 						}
 					}
 				}
@@ -441,26 +568,29 @@
 			heaterFrequencyChart = new Chart(heaterFrequencyCtx, {
 				type: 'line',
 				data: {
-					labels: heaterData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Frequenza (Hz)',
-						data: heaterData.map(d => d.frequency_hz),
+						data: heaterData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.frequency_hz
+						})),
 						borderColor: 'rgb(241, 196, 15)',
 						backgroundColor: 'rgba(241, 196, 15, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0,
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
-					plugins: {
-						title: {
-							display: true,
-							text: 'Frequenza - Stufa'
-						}
-					},
+					...getChartOptions('Frequenza - Stufa', false),
 					scales: {
+						...getChartOptions('', false).scales,
 						y: {
-							beginAtZero: false
+							...getChartOptions('', false).scales.y,
+							title: {
+								display: true,
+								text: 'Frequenza (Hz)'
+							}
 						}
 					}
 				}
@@ -473,26 +603,29 @@
 			fanVoltageChart = new Chart(fanVoltageCtx, {
 				type: 'line',
 				data: {
-					labels: fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Tensione (V)',
-						data: fanData.map(d => d.voltage_v),
+						data: fanData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.voltage_v
+						})),
 						borderColor: 'rgb(155, 89, 182)',
 						backgroundColor: 'rgba(155, 89, 182, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0,
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
-					plugins: {
-						title: {
-							display: true,
-							text: 'Tensione - Ventilatore'
-						}
-					},
+					...getChartOptions('Tensione - Ventilatore', false),
 					scales: {
+						...getChartOptions('', false).scales,
 						y: {
-							beginAtZero: false
+							...getChartOptions('', false).scales.y,
+							title: {
+								display: true,
+								text: 'Tensione (V)'
+							}
 						}
 					}
 				}
@@ -505,26 +638,29 @@
 			fanFrequencyChart = new Chart(fanFrequencyCtx, {
 				type: 'line',
 				data: {
-					labels: fanData.map(d => new Date(d.timestamp).toLocaleTimeString('it-IT')),
 					datasets: [{
 						label: 'Frequenza (Hz)',
-						data: fanData.map(d => d.frequency_hz),
+						data: fanData.map(d => ({
+							x: new Date(d.timestamp).getTime(),
+							y: d.frequency_hz
+						})),
 						borderColor: 'rgb(241, 196, 15)',
 						backgroundColor: 'rgba(241, 196, 15, 0.1)',
-						tension: 0.1
+						tension: 0.1,
+						pointRadius: 0,
+						pointHoverRadius: 4
 					}]
 				},
 				options: {
-					responsive: true,
-					plugins: {
-						title: {
-							display: true,
-							text: 'Frequenza - Ventilatore'
-						}
-					},
+					...getChartOptions('Frequenza - Ventilatore', false),
 					scales: {
+						...getChartOptions('', false).scales,
 						y: {
-							beginAtZero: false
+							...getChartOptions('', false).scales.y,
+							title: {
+								display: true,
+								text: 'Frequenza (Hz)'
+							}
 						}
 					}
 				}
@@ -534,6 +670,40 @@
 
 	function formatDate(dateString: string) {
 		return new Date(dateString).toLocaleString('it-IT');
+	}
+
+	// Funzione per resettare lo zoom su tutti i grafici
+	function resetAllZoom() {
+		const charts = [
+			heaterChart,
+			heaterPowerChart,
+			heaterVoltageChart,
+			heaterFrequencyChart,
+			fanChart,
+			fanPowerChart,
+			fanVoltageChart,
+			fanFrequencyChart
+		];
+
+		charts.forEach(chart => {
+			if (chart) {
+				// Reset zoom usando il plugin
+				if ((chart as any).zoomScale) {
+					(chart as any).zoomScale('x', { min: undefined, max: undefined });
+					(chart as any).zoomScale('y', { min: undefined, max: undefined });
+				}
+				// Reset alternativo: ripristina gli assi
+				if (chart.scales && chart.scales.x) {
+					chart.scales.x.options.min = undefined;
+					chart.scales.x.options.max = undefined;
+				}
+				if (chart.scales && chart.scales.y) {
+					chart.scales.y.options.min = undefined;
+					chart.scales.y.options.max = undefined;
+				}
+				chart.update('none');
+			}
+		});
 	}
 
 	async function startSession() {
@@ -947,7 +1117,22 @@
 
 		<!-- Grafici -->
 		<div class="charts-section">
-			<h3>Grafici Stufa</h3>
+			<div class="charts-header">
+				<h3>Grafici Stufa</h3>
+				<div class="chart-controls">
+					<button class="btn btn-small" on:click={resetAllZoom} title="Ripristina zoom su tutti i grafici">
+						Ripristina Zoom
+					</button>
+					<div class="zoom-help">
+						<strong>Zoom e Pan:</strong>
+						<ul>
+							<li>🔍 <strong>Zoom:</strong> Rotella mouse o pinch (mobile)</li>
+							<li>👆 <strong>Pan:</strong> Trascina con <kbd>Ctrl</kbd> (o <kbd>Shift</kbd> per drag-to-zoom)</li>
+							<li>🔄 <strong>Reset:</strong> Doppio click sul grafico</li>
+						</ul>
+					</div>
+				</div>
+			</div>
 			<div class="charts-grid">
 				<div class="chart-container">
 					<canvas id="heater-power-chart"></canvas>
@@ -965,7 +1150,9 @@
 		</div>
 
 		<div class="charts-section">
-			<h3>Grafici Ventilatore</h3>
+			<div class="charts-header">
+				<h3>Grafici Ventilatore</h3>
+			</div>
 			<div class="charts-grid">
 				<div class="chart-container">
 					<canvas id="fan-power-chart"></canvas>
@@ -1171,10 +1358,75 @@
 		margin-bottom: 3rem;
 	}
 
-	.charts-section h3 {
+	.charts-header {
+		display: flex;
+		justify-content: space-between;
+		align-items: flex-start;
 		margin-bottom: 1.5rem;
+		gap: 1rem;
+		flex-wrap: wrap;
+	}
+
+	.charts-section h3 {
+		margin: 0;
 		color: #2c3e50;
 		font-size: 1.5rem;
+	}
+
+	.chart-controls {
+		display: flex;
+		gap: 1rem;
+		align-items: flex-start;
+	}
+
+	.btn-small {
+		padding: 0.4rem 0.8rem;
+		font-size: 0.875rem;
+		background: #3498db;
+		color: white;
+		border: none;
+		border-radius: 4px;
+		cursor: pointer;
+		transition: background 0.2s;
+	}
+
+	.btn-small:hover {
+		background: #2980b9;
+	}
+
+	.zoom-help {
+		background: #f8f9fa;
+		border: 1px solid #dee2e6;
+		border-radius: 4px;
+		padding: 0.75rem;
+		font-size: 0.875rem;
+		max-width: 300px;
+	}
+
+	.zoom-help strong {
+		display: block;
+		margin-bottom: 0.5rem;
+		color: #2c3e50;
+	}
+
+	.zoom-help ul {
+		margin: 0.5rem 0 0 0;
+		padding-left: 1.25rem;
+		list-style: none;
+	}
+
+	.zoom-help li {
+		margin: 0.25rem 0;
+		line-height: 1.4;
+	}
+
+	.zoom-help kbd {
+		background: #e9ecef;
+		border: 1px solid #ced4da;
+		border-radius: 3px;
+		padding: 0.1rem 0.3rem;
+		font-size: 0.8em;
+		font-family: monospace;
 	}
 
 	.charts-grid {
